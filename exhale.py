@@ -40,157 +40,7 @@ Join the network:
     Press up.
 """
 
-home_id = None
-args = None
-
-def imports(args):
-    if args.timeout is None:
-        args.timeout = 2
-    if args.output == 'txt':
-        print("-------------------------------------------------------------------------------")
-        print("Import libs")
-        print("Try to import libopenzwave")
-        import libopenzwave
-        print("Try to import libopenzwave.PyLogLevels")
-        from libopenzwave import PyLogLevels
-        print("Try to get options")
-        options = libopenzwave.PyOptions(user_path=".", cmd_line="--logging false")
-        options.lock()
-        time.sleep(0.5)
-        print("Try to get manager")
-        manager = libopenzwave.PyManager()
-        manager.create()
-        print("Try to get python_openzwave version")
-        print(manager.getPythonLibraryVersionNumber())
-        print("Try to get python_openzwave full version")
-        print(manager.getPythonLibraryVersion())
-        print("Try to get openzwave version")
-        print(manager.getPythonLibraryVersion())
-        print("Try to get openzwave version")
-        print(manager.getOzwLibraryVersion())
-        print("Try to get default config path")
-        print(libopenzwave.configPath())
-        print("Try to destroy manager")
-        manager.destroy()
-        print("Try to destroy options")
-        options.destroy()
-        time.sleep(0.5)
-        print("Try to import openzwave (API)")
-        import openzwave
-
-    elif args.output == 'raw':
-        import libopenzwave
-        from libopenzwave import PyLogLevels
-        options = libopenzwave.PyOptions(user_path=".", cmd_line="--logging false")
-        options.lock()
-        time.sleep(0.5)
-        manager = libopenzwave.PyManager()
-        manager.create()
-        print("{0}|{1}|{2}|{3}".format(
-                manager.getOzwLibraryVersion(),
-                manager.getPythonLibraryVersionNumber(),
-                manager.getPythonLibraryVersion(),
-                libopenzwave.configPath()
-                ))
-        manager.destroy()
-        options.destroy()
-        time.sleep(0.5)
-        import openzwave
-
-def zwcallback(zwargs):
-    import libopenzwave
-    global args
-    if args.output == 'txt':
-        print('%s %s' % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
-    notify_type = zwargs['notificationType']
-    if notify_type == "DriverReady":
-        # XXX poke a thread-safe thing here.
-        global home_id
-        home_id = zwargs['homeId']
-
-    #print("Received {0} : {1}".format(notify_type,libopenzwave.PyNotifications[notify_type].doc))
-    #if args.output == 'txt':
-    #    print("Received {0}".format(notify_type))
-
-def init_device(args):
-    global home_id
-    if args.timeout is None:
-        args.timeout = 15
-    if args.output == 'txt':
-        print("-------------------------------------------------------------------------------")
-        print("Intialize device {0}".format(args.device))
-        import libopenzwave
-        print("Try to get options")
-        options = libopenzwave.PyOptions(config_path=args.config_path, user_path=args.user_path, cmd_line="--logging true")
-        options.lock()
-        time.sleep(1.0)
-        print("Try to get manager")
-        manager = libopenzwave.PyManager()
-        manager.create()
-        print("Try to get python_openzwave version")
-        print(manager.getPythonLibraryVersionNumber())
-        print("Try to get python_openzwave full version")
-        print(manager.getPythonLibraryVersion())
-        print("Try to get openzwave version")
-        print(manager.getOzwLibraryVersion())
-        print("Try to get default config path")
-        print(libopenzwave.configPath())
-        print("Try to add watcher")
-        manager.addWatcher(zwcallback)
-        time.sleep(1.0)
-        manager.addDriver(args.device)
-        print("Wait for notifications ({0}s)".format(args.timeout))
-        next_print = args.timeout/10
-        delta = 0.1
-        for i in range(0, int(args.timeout/delta)):
-            time.sleep(delta)
-            next_print -= delta
-            if next_print < 0:
-                next_print = args.timeout/10
-                print('.')
-        print("Try to remove driver")
-        manager.removeDriver(args.device)
-        time.sleep(3.0)
-        print("Try to remove watcher")
-        manager.removeWatcher(zwcallback)
-        print("Try to destroy manager")
-        manager.destroy()
-        time.sleep(0.2)
-        print("Try to destroy options")
-        options.destroy()
-        time.sleep(1.0)
-        print("Retrieve HomeID")
-        print("{0:08x}".format(home_id))
-    elif args.output == 'raw':
-        import libopenzwave
-        options = libopenzwave.PyOptions(config_path=args.config_path, user_path=args.user_path, cmd_line="--logging false")
-        options.lock()
-        time.sleep(1.0)
-        manager = libopenzwave.PyManager()
-        manager.create()
-        manager.addWatcher(zwcallback)
-        time.sleep(1.0)
-        manager.addDriver(args.device)
-        next_print = args.timeout/10
-        delta = 0.1
-        for i in range(0, int(args.timeout/delta)):
-            time.sleep(delta)
-        print("{0}|{1}|{2}|{3}|{4:08x}".format(
-                manager.getOzwLibraryVersion(),
-                manager.getPythonLibraryVersionNumber(),
-                manager.getPythonLibraryVersion(),
-                libopenzwave.configPath(),
-                home_id,
-                ))
-        manager.removeDriver(args.device)
-        timedestroysleep(0.5)
-        manager.removeWatcher(zwcallback)
-        manager.destroy()
-        time.sleep(0.2)
-        options.destroy()
-
 def list_nodes(args):
-    global home_id
     if args.timeout is None:
         args.timeout = 60*60*4+1
     import openzwave
@@ -268,14 +118,63 @@ def list_nodes(args):
     print("Exit")
 
 
-class FancyQueue(queue.Queue):
-    def __init__(self, timeout):
-        super().__init__()
-        self._timeout = timeout
+class Switch:
+    def __init__(self, switch_id):
+        self.switch_id = switch_id
+        self.onoff = None
 
-    def log_and_put(self, zwargs):
+    def __str__(self):
+        return "Switch %r, onoff=%r" % (self.switch_id, self.onoff)
+
+
+class StateTracker:
+    def __init__(self, timeout):
+        self._timeout = timeout
+        self._q = queue.Queue()
+        self.switches = {}
+        self.home_id = None
+
+    def watcher_cb(self, zwargs):
         print("%s %s" % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
-        self.put(zwargs)
+        self._q.put(zwargs)
+
+    def wait_for_nodes(self):
+        if self.home_id is not None:
+            raise AssertionError("Can't wait_for_nodes() with existing home_id")
+        self.home_id = self.match("DriverReady")['homeId']
+        self.match("AllNodesQueried")
+
+    def wait_for_driver_removed(self):
+        self.match("DriverRemoved")
+        self.home_id = None
+        self.switches.clear()
+
+    def _q_get(self, timeout):
+        zwargs = self._q.get(block=True, timeout=timeout)
+        ntype = zwargs["notificationType"]
+        if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
+            switch_id = zwargs["valueId"]["id"]
+            switch = Switch(switch_id)
+            print("Adding %s" % switch)
+            self.switches[switch_id] = switch
+        elif ntype == "ValueChanged" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
+            switch_id = zwargs["valueId"]["id"]
+            onoff = zwargs["valueId"]["value"]
+            try:
+                switch = self.switches[switch_id]
+            except KeyError:
+                print("Unknown switch %r" % switch_id)
+            else:
+                switch.onoff = onoff
+                print(switch)
+                # XXX do something here
+        return zwargs
+
+    def q_passive(self, timeout):
+        try:
+            self._q_get(timeout)
+        except queue.Empty:
+            pass
 
     def match(self, notify_type, *match):
         if match:
@@ -286,9 +185,9 @@ class FancyQueue(queue.Queue):
         timeout = self._timeout
         while True:
             start = time.time()
-            zwargs = self.get(block=True, timeout=timeout)
+            zwargs = self._q_get(timeout=timeout)
             timeout -= (time.time() - start)
-            if zwargs['notificationType'] != notify_type:
+            if zwargs["notificationType"] != notify_type:
                 continue
             if match:
                 z = zwargs
@@ -297,14 +196,6 @@ class FancyQueue(queue.Queue):
                 if z != match[-1]:
                     continue
             return zwargs
-
-    def purge(self):
-        try:
-            while True:
-                self.get(block=False)
-        except queue.Empty:
-            pass
-
 
 def hard_reset(args):
     print("hard_reset")
@@ -325,29 +216,28 @@ def hard_reset(args):
     options.set_logging(True)
     options.lock()
 
-    q = FancyQueue(args.timeout)
+    st = StateTracker(args.timeout)
 
     manager = libopenzwave.PyManager()
     manager.create()
-    manager.addWatcher(q.log_and_put)
+    manager.addWatcher(st.watcher_cb)
     manager.addDriver(args.device)
 
-    home_id = q.match("DriverReady")['homeId']
-    q.match("AllNodesQueried")
+    st.wait_for_nodes()
 
     print("Resetting controller...")
-    manager.resetController(home_id)
-    q.match("DriverRemoved")
-    home_id = q.match("DriverReady")['homeId']
-    q.match("AllNodesQueried")
+    manager.resetController(st.home_id)
+    st.wait_for_driver_removed()
+    st.wait_for_nodes()
 
+    # XXX probably want to add N switches here?
     print("Adding node...")
-    manager.addNode(home_id, doSecurity=False)
-    zwargs = q.match("ControllerCommand", "controllerState", "Waiting")
+    manager.addNode(st.home_id, doSecurity=False)
+    zwargs = st.match("ControllerCommand", "controllerState", "Waiting")
     print(RESET_DOC)
 
-    q.match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
-    q.match("ControllerCommand", "controllerState", "Completed")
+    st.match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
+    st.match("ControllerCommand", "controllerState", "Completed")
 
     print("Everything seems fine!")
     manager.destroy()
@@ -371,22 +261,15 @@ def co2(args):
     options.set_logging(True)
     options.lock()
 
-    q = FancyQueue(args.timeout)
+    st = StateTracker(args.timeout)
 
     manager = libopenzwave.PyManager()
     manager.create()
-    manager.addWatcher(q.log_and_put)
+    manager.addWatcher(st.watcher_cb)
     manager.addDriver(args.device)
 
-    home_id = q.match("DriverReady")['homeId']
-
-    vid = q.match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")["valueId"]
-    switch_node_id = vid["nodeId"]
-    switch_value_id = vid["id"]
-
-    q.match("AllNodesQueried")
-
-    print("READY!", home_id, switch_node_id, switch_value_id)
+    st.wait_for_nodes()
+    print("Active switch count: %d" % len(st.switches))
 
     # Turn off spam for now.
     #manager.setPollInterval(250, True)  # 4 Hz
@@ -395,7 +278,7 @@ def co2(args):
     def wait_for_quiet():
         old_q = None
         while True:
-            q = manager.getSendQueueCount(home_id) 
+            q = manager.getSendQueueCount(st.home_id)
             if q == 0 and old_q is None:
                 return
             if q != old_q:
@@ -409,7 +292,7 @@ def co2(args):
     # pip3 install adafruit-circuitpython-scd30
     import board
     import adafruit_scd30
-    
+
     i2c = board.I2C()   # uses board.SCL and board.SDA
     scd = adafruit_scd30.SCD30(i2c)
 
@@ -420,29 +303,28 @@ def co2(args):
             time.sleep(0.5)
 
         co2 = scd.CO2
-        hum = scd.relative_humidity
         if co2 > 800:
             wait_for_quiet()
-            manager.setValue(switch_value_id, 1)
+            for switch_id in st.switches:
+                manager.setValue(switch_id, 1)
             onoff = 1
         elif co2 < 750:
             wait_for_quiet()
-            manager.setValue(switch_value_id, 0)
+            for switch_id in st.switches:
+                manager.setValue(switch_id, 0)
             onoff = 0
 
         ts = datetime.datetime.now().replace(microsecond=0).isoformat(" ")
-        print("%s, %d, %d, %.1f" % (ts, co2, onoff, hum), flush=True)
+        print("%s, %d, %d" % (ts, co2, onoff), flush=True)
 
-        q.purge()
-        time.sleep(60.0)
-
+        # Passively consume messages for a while.
+        start = time.time()
+        while time.time() < start + 60:
+            st.q_passive(1.0)
 
 def pyozw_parser():
     parser = argparse.ArgumentParser(description='Run python_openzwave basics checks.')
-    parser.add_argument('-o', '--output', action='store', help='The format (txt, raw, ...)', choices=['txt', 'raw'], default='txt')
     parser.add_argument('-d', '--device', action='store', help='The device port', default=None)
-    parser.add_argument('-m', '--imports', action='store_true', help='Import all libs', default=True)
-    parser.add_argument('-i', '--init_device', action='store_true', help='Intialize the device', default=False)
     parser.add_argument('-l', '--list_nodes', action='store_true', help='List the nodes on zwave network', default=False)
     parser.add_argument('-t', '--timeout', action='store',type=int, help='The default timeout for zwave network sniffing', default=None)
     parser.add_argument('--config_path', action='store', help='The config_path for openzwave', default=None)
@@ -452,25 +334,17 @@ def pyozw_parser():
     # Hacks
     parser.add_argument('--hard_reset', action='store_true', help='XXX', default=False)
     parser.add_argument('--co2', action='store_true', help='XXX', default=False)
-    parser.add_argument('--remove_node', action='store_true', help='XXX', default=False)
     return parser
 
 def main():
     parser = pyozw_parser()
-    global args
     args = parser.parse_args()
-    if args.init_device:
-        init_device(args)
-    elif args.list_nodes:
+    if args.list_nodes:
         list_nodes(args)
     elif args.hard_reset:
         hard_reset(args)
     elif args.co2:
         co2(args)
-    elif args.remove_node:
-        remove_node(args)
-    elif args.imports:
-        imports(args)
 
 if __name__ == '__main__':
     main()
