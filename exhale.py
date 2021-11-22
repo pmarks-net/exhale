@@ -26,9 +26,14 @@ h = logging.NullHandler()
 logger = logging.getLogger(__name__).addHandler(h)
 import time
 import argparse
+import collections
 import datetime
 import threading
 import queue
+
+# pip3 install adafruit-circuitpython-scd30
+import board
+import adafruit_scd30
 
 RESET_DOC = """
 Tips for my UltraPro Z-Wave toggle switch:
@@ -119,12 +124,13 @@ def list_nodes(args):
 
 
 class Switch:
-    def __init__(self, switch_id):
+    def __init__(self, node_id, switch_id):
+        self.node_id = node_id
         self.switch_id = switch_id
         self.onoff = None
 
     def __str__(self):
-        return "Switch %r, onoff=%r" % (self.switch_id, self.onoff)
+        return "Switch node_id=%r, switch_id=%r, onoff=%r" % (self.node_id, self.switch_id, self.onoff)
 
 
 class StateTracker:
@@ -142,7 +148,7 @@ class StateTracker:
         if self.home_id is not None:
             raise AssertionError("Can't wait_for_nodes() with existing home_id")
         self.home_id = self.match("DriverReady")['homeId']
-        self.match("AllNodesQueried")
+        self.match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
 
     def wait_for_driver_removed(self):
         self.match("DriverRemoved")
@@ -153,21 +159,35 @@ class StateTracker:
         zwargs = self._q.get(block=True, timeout=timeout)
         ntype = zwargs["notificationType"]
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
+            node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
-            switch = Switch(switch_id)
+            switch = Switch(node_id, switch_id)
             print("Adding %s" % switch)
-            self.switches[switch_id] = switch
+            self.switches[node_id] = switch
         elif ntype == "ValueChanged" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
+            node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
             onoff = zwargs["valueId"]["value"]
             try:
-                switch = self.switches[switch_id]
+                switch = self.switches[node_id]
+                if switch.switch_id != switch_id:
+                    raise KeyError
             except KeyError:
-                print("Unknown switch %r" % switch_id)
+                print("Unknown switch %r" % node_id)
             else:
                 switch.onoff = onoff
                 print(switch)
                 # XXX do something here
+        elif ntype == "Notification" and zwargs["notificationCode"] == 6:
+            node_id = zwargs["nodeId"]
+            try:
+                switch = self.switches[node_id]
+            except KeyError:
+                pass
+            else:
+                # TODO: something... but only after wait_for_nodes
+                print("Switch %r alive" % node_id)
+
         return zwargs
 
     def q_passive(self, timeout):
@@ -177,17 +197,20 @@ class StateTracker:
             pass
 
     def match(self, notify_type, *match):
+        return self.match_any([notify_type], *match)
+
+    def match_any(self, notify_types, *match):
         if match:
             note = " with %s=%r" % ("".join("[%r]" % m for m in match[:-1]), match[-1])
         else:
             note = ""
-        print("=== Waiting for %r%s ===" % (notify_type, note))
+        print("=== Waiting for %r%s ===" % (notify_types, note))
         timeout = self._timeout
         while True:
-            start = time.time()
+            start = time.monotonic()
             zwargs = self._q_get(timeout=timeout)
-            timeout -= (time.time() - start)
-            if zwargs["notificationType"] != notify_type:
+            timeout -= (time.monotonic() - start)
+            if zwargs["notificationType"] not in notify_types:
                 continue
             if match:
                 z = zwargs
@@ -196,6 +219,89 @@ class StateTracker:
                 if z != match[-1]:
                     continue
             return zwargs
+
+
+class CO2Reader(threading.Thread):
+    WINDOW_SEC = 60
+
+    def __init__(self):
+        super().__init__(name="CO2Reader", daemon=True)
+        self.lock = threading.Lock()
+        self.samples = collections.deque()
+
+    def run(self):
+        while True:
+            try:
+                self.reader_loop()
+            except Exception as e:
+                print("CO2Reader failed:", e)
+                time.sleep(1.0)
+
+    def reader_loop(self):
+        i2c = board.I2C()   # uses board.SCL and board.SDA
+        scd = adafruit_scd30.SCD30(i2c)
+
+        while True:
+            while not scd.data_available:
+                time.sleep(0.1)
+
+            t = time.monotonic()
+            samples = self.samples
+            with self.lock:
+                samples.append((t, scd.CO2))
+                while samples[0][0] < t - self.WINDOW_SEC:
+                    samples.popleft()
+
+            co2_avg = self.co2_avg()
+            print("CO2=", co2_avg, flush=True)
+            global_blinker.blink_number(co2_avg // 100)
+
+    def co2_avg(self):
+        t = time.monotonic()
+        with self.lock:
+            samples = self.samples
+            if samples and samples[-1][0] >= t - self.WINDOW_SEC:
+                co2_avg = int(sum(co2 for t, co2 in samples) / len(samples))
+                if co2_avg < 100:
+                    co2_avg = 100
+                if co2_avg > 2000:
+                    co2_avg = 2000
+                return co2_avg
+            else:
+                return 0  # No data... this will turn off the fan.
+
+class Blinker(threading.Thread):
+    def __init__(self):
+        super().__init__(name="Blinker", daemon=True)
+        self.lock = threading.Condition()
+        self.do_next = None
+
+    def blink_number(self, number):
+        with self.lock:
+            self.do_next = number
+            self.lock.notify()
+
+    def run(self):
+        # Raspberry Pi red LED:
+        # sudo chmod a+w /sys/class/leds/led1/brightness
+        with open("/sys/class/leds/led1/brightness", "w") as f:
+            def write_n(n, sleep_time=None):
+                f.write("%d\n" % n)
+                f.flush()
+                if sleep_time is not None:
+                    time.sleep(sleep_time)
+            while True:
+                with self.lock:
+                    self.lock.wait_for(lambda: self.do_next is not None)
+                    number, self.do_next = self.do_next, None
+                print("BLINKER", number)
+                for i in range(number):
+                    write_n(1, 0.1)
+                    write_n(0, 0.4)
+                time.sleep(3.0)
+
+# XXX make this not global.
+global_blinker = Blinker()
 
 def hard_reset(args):
     print("hard_reset")
@@ -244,6 +350,10 @@ def hard_reset(args):
 
 
 def co2(args):
+    co2_reader = CO2Reader()
+    co2_reader.start()
+    global_blinker.start()
+
     if args.timeout is None:
         args.timeout = 60
     import libopenzwave
@@ -271,9 +381,10 @@ def co2(args):
     st.wait_for_nodes()
     print("Active switch count: %d" % len(st.switches))
 
-    # Turn off spam for now.
-    #manager.setPollInterval(250, True)  # 4 Hz
-    #manager.enablePoll(switch_value_id)
+    # Useful for detecting when a switch is dead.
+    manager.setPollInterval(10000, True)
+    for switch in st.switches.values():
+        manager.enablePoll(switch.switch_id)
 
     def wait_for_quiet():
         old_q = None
@@ -288,38 +399,25 @@ def co2(args):
             old_q = q
             time.sleep(0.1)
 
-    # HACKY
-    # pip3 install adafruit-circuitpython-scd30
-    import board
-    import adafruit_scd30
-
-    i2c = board.I2C()   # uses board.SCL and board.SDA
-    scd = adafruit_scd30.SCD30(i2c)
-
-    onoff = 0  # 0 off, 1 on.
+    onoff = False
 
     while True:
-        while not scd.data_available:
-            time.sleep(0.5)
-
-        co2 = scd.CO2
+        co2 = co2_reader.co2_avg()
         if co2 > 800:
-            wait_for_quiet()
-            for switch_id in st.switches:
-                manager.setValue(switch_id, 1)
-            onoff = 1
+            onoff = True
         elif co2 < 750:
-            wait_for_quiet()
-            for switch_id in st.switches:
-                manager.setValue(switch_id, 0)
-            onoff = 0
+            onoff = False
+
+        wait_for_quiet()
+        for switch in st.switches.values():
+            manager.setValue(switch.switch_id, 1 if onoff else 0)
 
         ts = datetime.datetime.now().replace(microsecond=0).isoformat(" ")
         print("%s, %d, %d" % (ts, co2, onoff), flush=True)
 
         # Passively consume messages for a while.
-        start = time.time()
-        while time.time() < start + 60:
+        start = time.monotonic()
+        while time.monotonic() < start + 10:
             st.q_passive(1.0)
 
 def pyozw_parser():
