@@ -24,12 +24,13 @@ along with python-openzwave. If not, see http://www.gnu.org/licenses.
 import logging
 h = logging.NullHandler()
 logger = logging.getLogger(__name__).addHandler(h)
-import time
 import argparse
+import asyncio
 import collections
 import datetime
 import threading
-import queue
+import time
+import traceback
 
 # pip3 install adafruit-circuitpython-scd30
 import board
@@ -136,27 +137,29 @@ class Switch:
 class StateTracker:
     def __init__(self, timeout):
         self._timeout = timeout
-        self._q = queue.Queue()
+        self._loop = asyncio.get_running_loop()
+        self._q = asyncio.Queue()
         self.switches = {}
         self.home_id = None
 
-    def watcher_cb(self, zwargs):
+    def threadsafe_watcher_cb(self, zwargs):
         print("%s %s" % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
-        self._q.put(zwargs)
+        self._loop.call_soon_threadsafe(lambda: self._q.put_nowait(zwargs))
 
-    def wait_for_nodes(self):
+    async def wait_for_nodes(self):
         if self.home_id is not None:
             raise AssertionError("Can't wait_for_nodes() with existing home_id")
-        self.home_id = self.match("DriverReady")['homeId']
-        self.match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
+        zwargs = await self.match("DriverReady")
+        self.home_id = zwargs['homeId']
+        await self.match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
 
-    def wait_for_driver_removed(self):
-        self.match("DriverRemoved")
+    async def wait_for_driver_removed(self):
+        await self.match("DriverRemoved")
         self.home_id = None
         self.switches.clear()
 
-    def _q_get(self, timeout):
-        zwargs = self._q.get(block=True, timeout=timeout)
+    async def _q_get(self, timeout):
+        zwargs = await asyncio.wait_for(self._q.get(), timeout=timeout)
         ntype = zwargs["notificationType"]
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
@@ -190,16 +193,16 @@ class StateTracker:
 
         return zwargs
 
-    def q_passive(self, timeout):
+    async def q_passive(self, timeout):
         try:
-            self._q_get(timeout)
-        except queue.Empty:
+            await self._q_get(timeout)
+        except asyncio.TimeoutError:
             pass
 
-    def match(self, notify_type, *match):
-        return self.match_any([notify_type], *match)
+    async def match(self, notify_type, *match):
+        return await self.match_any([notify_type], *match)
 
-    def match_any(self, notify_types, *match):
+    async def match_any(self, notify_types, *match):
         if match:
             note = " with %s=%r" % ("".join("[%r]" % m for m in match[:-1]), match[-1])
         else:
@@ -208,7 +211,7 @@ class StateTracker:
         timeout = self._timeout
         while True:
             start = time.monotonic()
-            zwargs = self._q_get(timeout=timeout)
+            zwargs = await self._q_get(timeout=timeout)
             timeout -= (time.monotonic() - start)
             if zwargs["notificationType"] not in notify_types:
                 continue
@@ -221,89 +224,89 @@ class StateTracker:
             return zwargs
 
 
-class CO2Reader(threading.Thread):
+class CO2Reader:
     WINDOW_SEC = 60
 
     def __init__(self):
-        super().__init__(name="CO2Reader", daemon=True)
-        self.lock = threading.Lock()
         self.samples = collections.deque()
+        self.task = asyncio.create_task(self.run())
 
-    def run(self):
+    async def run(self):
         while True:
             try:
-                self.reader_loop()
+                await self.reader_loop()
+            except asyncio.CancelledError:
+                return
             except Exception as e:
                 print("CO2Reader failed:", e)
-                time.sleep(1.0)
+                await asyncio.sleep(1.0)
 
-    def reader_loop(self):
+    async def reader_loop(self):
         i2c = board.I2C()   # uses board.SCL and board.SDA
         scd = adafruit_scd30.SCD30(i2c)
 
         while True:
             while not scd.data_available:
-                time.sleep(0.1)
+                await asyncio.sleep(0.5)
 
             t = time.monotonic()
-            samples = self.samples
-            with self.lock:
-                samples.append((t, scd.CO2))
-                while samples[0][0] < t - self.WINDOW_SEC:
-                    samples.popleft()
+            self.samples.append((t, scd.CO2))
+            while self.samples[0][0] < t - self.WINDOW_SEC:
+                self.samples.popleft()
 
-            co2_avg = self.co2_avg()
-            print("CO2=", co2_avg, flush=True)
-            global_blinker.blink_number(co2_avg // 100)
-
-    def co2_avg(self):
+    def co2_avg(self, freshness=None):
+        freshness = freshness or self.WINDOW_SEC
         t = time.monotonic()
-        with self.lock:
-            samples = self.samples
-            if samples and samples[-1][0] >= t - self.WINDOW_SEC:
-                co2_avg = int(sum(co2 for t, co2 in samples) / len(samples))
-                if co2_avg < 100:
-                    co2_avg = 100
-                if co2_avg > 2000:
-                    co2_avg = 2000
-                return co2_avg
-            else:
-                return 0  # No data... this will turn off the fan.
+        samples = self.samples
+        if samples and samples[-1][0] >= t - freshness:
+            co2_avg = int(sum(co2 for t, co2 in samples) / len(samples))
+            if co2_avg < 100:
+                co2_avg = 100
+            if co2_avg > 2000:
+                co2_avg = 2000
+            return co2_avg
+        else:
+            return 0  # No data... this will turn off the fan.
 
-class Blinker(threading.Thread):
-    def __init__(self):
-        super().__init__(name="Blinker", daemon=True)
-        self.lock = threading.Condition()
-        self.do_next = None
+class CO2Blinker:
+    def __init__(self, co2_reader):
+        self.co2_reader = co2_reader
+        self.task = asyncio.create_task(self.run())
 
-    def blink_number(self, number):
-        with self.lock:
-            self.do_next = number
-            self.lock.notify()
+    async def run(self):
+        try:
+            await self.run_or_die()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise
 
-    def run(self):
+    async def run_or_die(self):
         # Raspberry Pi red LED:
         # sudo chmod a+w /sys/class/leds/led1/brightness
         with open("/sys/class/leds/led1/brightness", "w") as f:
-            def write_n(n, sleep_time=None):
+            async def write_n(n, sleep_time=None):
                 f.write("%d\n" % n)
                 f.flush()
                 if sleep_time is not None:
-                    time.sleep(sleep_time)
+                    await asyncio.sleep(sleep_time)
             while True:
-                with self.lock:
-                    self.lock.wait_for(lambda: self.do_next is not None)
-                    number, self.do_next = self.do_next, None
-                print("BLINKER", number)
+                co2_avg = self.co2_reader.co2_avg(freshness=5.0)
+                number = co2_avg // 100
+                print("CO2Blinker %d -> %d" % (co2_avg, number))
                 for i in range(number):
-                    write_n(1, 0.1)
-                    write_n(0, 0.4)
-                time.sleep(3.0)
+                    if (i + 1) % 5 == 0:
+                        await write_n(0, 0.2)
+                        await write_n(1, 0.3)
+                        await write_n(0, 0.0)
+                    else:
+                        await write_n(0, 0.2)
+                        await write_n(1, 0.1)
+                        await write_n(0, 0.2)
+                await asyncio.sleep(3.0)
 
-# XXX make this not global.
-global_blinker = Blinker()
-
-def hard_reset(args):
+async def hard_reset(args):
     print("hard_reset")
     if args.timeout is None:
         args.timeout = 60
@@ -326,34 +329,39 @@ def hard_reset(args):
 
     manager = libopenzwave.PyManager()
     manager.create()
-    manager.addWatcher(st.watcher_cb)
+    manager.addWatcher(st.threadsafe_watcher_cb)
     manager.addDriver(args.device)
 
-    st.wait_for_nodes()
+    await st.wait_for_nodes()
 
     print("Resetting controller...")
     manager.resetController(st.home_id)
-    st.wait_for_driver_removed()
-    st.wait_for_nodes()
+    await st.wait_for_driver_removed()
+    await st.wait_for_nodes()
 
     # XXX probably want to add N switches here?
     print("Adding node...")
     manager.addNode(st.home_id, doSecurity=False)
-    zwargs = st.match("ControllerCommand", "controllerState", "Waiting")
+    zwargs = await st.match("ControllerCommand", "controllerState", "Waiting")
     print(RESET_DOC)
 
-    st.match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
-    st.match("ControllerCommand", "controllerState", "Completed")
+    await st.match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
+    await st.match("ControllerCommand", "controllerState", "Completed")
 
     print("Everything seems fine!")
     manager.destroy()
 
 
-def co2(args):
+async def co2_main(args):
     co2_reader = CO2Reader()
-    co2_reader.start()
-    global_blinker.start()
+    co2_blinker = CO2Blinker(co2_reader)
+    try:
+        await co2_sub(args, co2_reader)
+    finally:
+        co2_blinker.task.cancel()
+        co2_reader.task.cancel()
 
+async def co2_sub(args, co2_reader):
     if args.timeout is None:
         args.timeout = 60
     import libopenzwave
@@ -375,10 +383,10 @@ def co2(args):
 
     manager = libopenzwave.PyManager()
     manager.create()
-    manager.addWatcher(st.watcher_cb)
+    manager.addWatcher(st.threadsafe_watcher_cb)
     manager.addDriver(args.device)
 
-    st.wait_for_nodes()
+    await st.wait_for_nodes()
     print("Active switch count: %d" % len(st.switches))
 
     # Useful for detecting when a switch is dead.
@@ -386,7 +394,7 @@ def co2(args):
     for switch in st.switches.values():
         manager.enablePoll(switch.switch_id)
 
-    def wait_for_quiet():
+    async def wait_for_quiet():
         old_q = None
         while True:
             q = manager.getSendQueueCount(st.home_id)
@@ -397,7 +405,7 @@ def co2(args):
             if q == 0:
                 return
             old_q = q
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
 
     onoff = False
 
@@ -408,7 +416,7 @@ def co2(args):
         elif co2 < 750:
             onoff = False
 
-        wait_for_quiet()
+        await wait_for_quiet()
         for switch in st.switches.values():
             manager.setValue(switch.switch_id, 1 if onoff else 0)
 
@@ -418,7 +426,7 @@ def co2(args):
         # Passively consume messages for a while.
         start = time.monotonic()
         while time.monotonic() < start + 10:
-            st.q_passive(1.0)
+            await st.q_passive(1.0)
 
 def pyozw_parser():
     parser = argparse.ArgumentParser(description='Run python_openzwave basics checks.')
@@ -440,9 +448,9 @@ def main():
     if args.list_nodes:
         list_nodes(args)
     elif args.hard_reset:
-        hard_reset(args)
+        asyncio.run(hard_reset(args))
     elif args.co2:
-        co2(args)
+        asyncio.run(co2_main(args))
 
 if __name__ == '__main__':
     main()
