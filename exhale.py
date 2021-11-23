@@ -160,6 +160,7 @@ class StateTracker:
 
     async def _q_get(self, timeout):
         zwargs = await asyncio.wait_for(self._q.get(), timeout=timeout)
+        self._q.task_done()
         ntype = zwargs["notificationType"]
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
@@ -227,7 +228,8 @@ class StateTracker:
 class CO2Reader:
     WINDOW_SEC = 60
 
-    def __init__(self):
+    def __init__(self, blinker):
+        self.blinker = blinker
         self.samples = collections.deque()
         self.task = asyncio.create_task(self.run())
 
@@ -254,11 +256,14 @@ class CO2Reader:
             while self.samples[0][0] < t - self.WINDOW_SEC:
                 self.samples.popleft()
 
-    def co2_avg(self, freshness=None):
-        freshness = freshness or self.WINDOW_SEC
+            co2_avg = self.co2_avg()
+            print("CO2Reader", co2_avg)
+            self.blinker.blink_number(co2_avg // 100)
+
+    def co2_avg(self):
         t = time.monotonic()
         samples = self.samples
-        if samples and samples[-1][0] >= t - freshness:
+        if samples and samples[-1][0] >= t - self.WINDOW_SEC:
             co2_avg = int(sum(co2 for t, co2 in samples) / len(samples))
             if co2_avg < 100:
                 co2_avg = 100
@@ -268,10 +273,16 @@ class CO2Reader:
         else:
             return 0  # No data... this will turn off the fan.
 
-class CO2Blinker:
-    def __init__(self, co2_reader):
-        self.co2_reader = co2_reader
+class Blinker:
+    def __init__(self):
+        self.q = asyncio.Queue(maxsize=1)
         self.task = asyncio.create_task(self.run())
+
+    def blink_number(self, number):
+        try:
+            self.q.put_nowait(number)
+        except asyncio.QueueFull:
+            pass
 
     async def run(self):
         try:
@@ -292,9 +303,9 @@ class CO2Blinker:
                 if sleep_time is not None:
                     await asyncio.sleep(sleep_time)
             while True:
-                co2_avg = self.co2_reader.co2_avg(freshness=5.0)
-                number = co2_avg // 100
-                print("CO2Blinker %d -> %d" % (co2_avg, number))
+                number = await self.q.get()
+                print("Blinker", number)
+                self.q.task_done()
                 for i in range(number):
                     if (i + 1) % 5 == 0:
                         await write_n(0, 0.2)
@@ -353,12 +364,12 @@ async def hard_reset(args):
 
 
 async def co2_main(args):
-    co2_reader = CO2Reader()
-    co2_blinker = CO2Blinker(co2_reader)
+    blinker = Blinker()
+    co2_reader = CO2Reader(blinker)
     try:
         await co2_sub(args, co2_reader)
     finally:
-        co2_blinker.task.cancel()
+        blinker.task.cancel()
         co2_reader.task.cancel()
 
 async def co2_sub(args, co2_reader):
