@@ -31,10 +31,16 @@ import datetime
 import threading
 import time
 import traceback
+from enum import Enum
 
 # pip3 install adafruit-circuitpython-scd30
 import board
+import busio
 import adafruit_scd30
+
+# pip3 install adafruit-extended-bus
+# dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10
+import adafruit_extended_bus
 
 RESET_DOC = """
 Tips for my UltraPro Z-Wave toggle switch:
@@ -61,11 +67,8 @@ def list_nodes(args):
     print("-------------------------------------------------------------------------------")
     print("Define options for device {0}".format(args.device))
     options = ZWaveOption(device=args.device, config_path=args.config_path, user_path=args.user_path)
-    options.set_log_file("OZW_Log.log")
-    options.set_append_log_file(False)
+    options.set_log_file("/dev/null")
     options.set_console_output(False)
-    options.set_save_log_level("Debug")
-    options.set_logging(True)
     options.lock()
 
     print("Start network")
@@ -124,19 +127,66 @@ def list_nodes(args):
     print("Exit")
 
 
+# TODO: Something useful with this.
+class SwitchState(Enum):
+    IS_ALIVE = 1
+    IS_ON = 2
+    IS_OFF = 3
+    WANT_ON = 4
+    WANT_OFF = 5
+
 class Switch:
-    def __init__(self, node_id, switch_id):
+    def __init__(self, node_id, switch_id, zwave_set_value):
         self.node_id = node_id
         self.switch_id = switch_id
+        self.zwave_set_value = zwave_set_value
         self.onoff = None
+        self.task = asyncio.create_task(self.run())
+
+        # Queue of SwitchState enums.
+        self.q = asyncio.Queue()
 
     def __str__(self):
         return "Switch node_id=%r, switch_id=%r, onoff=%r" % (self.node_id, self.switch_id, self.onoff)
 
+    def set_alive(self):
+        self.queue.put_nowait(SwitchState.ALIVE)
+
+    def set_onoff(self, onoff):
+        pass
+
+    async def run(self):
+        try:
+            await self.run_or_die()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            raise
+
+    async def run_or_die(self):
+        while True:
+            await self.q.get()
+
+    async def eat_queue(self):
+        is_alive = False
+        last_value = None
+        v = await self.q.get()
+        while True:
+            if v == SwitchState.ALIVE:
+                is_alive = True
+            else:
+                last_value = v
+            try:
+                v = self.queue.pop_nowait()
+            except asyncio.QueueEmpty:
+                break
+
 
 class StateTracker:
-    def __init__(self, timeout):
+    def __init__(self, timeout, zwave_set_value):
         self._timeout = timeout
+        self._zwave_set_value = zwave_set_value
         self._loop = asyncio.get_running_loop()
         self._q = asyncio.Queue()
         self.switches = {}
@@ -165,7 +215,12 @@ class StateTracker:
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
-            switch = Switch(node_id, switch_id)
+            switch = Switch(node_id, switch_id, self._zwave_set_value)
+            try:
+                self.switches[node_id].task.cancel()
+                print("Destroyed duplicate switch with node_id %r" % node_id)
+            except KeyError:
+                pass
             print("Adding %s" % switch)
             self.switches[node_id] = switch
         elif ntype == "ValueChanged" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
@@ -244,7 +299,8 @@ class CO2Reader:
                 await asyncio.sleep(1.0)
 
     async def reader_loop(self):
-        i2c = board.I2C()   # uses board.SCL and board.SDA
+        #i2c = board.I2C()   # uses board.SCL and board.SDA
+        i2c = adafruit_extended_bus.ExtendedI2C(6)
         scd = adafruit_scd30.SCD30(i2c)
 
         while True:
@@ -329,14 +385,14 @@ async def hard_reset(args):
     print("-------------------------------------------------------------------------------")
     print("Define options for device {0}".format(args.device))
     options = ZWaveOption(device=args.device, config_path=args.config_path, user_path=args.user_path)
-    options.set_log_file("OZW_Log.log")
-    options.set_append_log_file(False)
+    options.set_log_file("/dev/null")
     options.set_console_output(False)
-    options.set_save_log_level("Debug")
-    options.set_logging(True)
     options.lock()
 
-    st = StateTracker(args.timeout)
+    def zwave_set_value(switch_id, value):
+        print("zwave_set_value unimplemented here")
+
+    st = StateTracker(args.timeout, zwave_set_value)
 
     manager = libopenzwave.PyManager()
     manager.create()
@@ -383,14 +439,14 @@ async def co2_sub(args, co2_reader):
     print("-------------------------------------------------------------------------------")
     print("Define options for device {0}".format(args.device))
     options = ZWaveOption(device=args.device, config_path=args.config_path, user_path=args.user_path)
-    options.set_log_file("OZW_Log.log")
-    options.set_append_log_file(False)
+    options.set_log_file("/dev/null")
     options.set_console_output(False)
-    options.set_save_log_level("Debug")
-    options.set_logging(True)
     options.lock()
 
-    st = StateTracker(args.timeout)
+    def zwave_set_value(switch_id, value):
+        manager.setValue(switch_id, value)
+
+    st = StateTracker(args.timeout, zwave_set_value)
 
     manager = libopenzwave.PyManager()
     manager.create()
