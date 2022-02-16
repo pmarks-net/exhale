@@ -127,20 +127,29 @@ def list_nodes(args):
     print("Exit")
 
 
-# TODO: Something useful with this.
 class SwitchState(Enum):
-    IS_ALIVE = 1
-    IS_ON = 2
-    IS_OFF = 3
+    ALIVE = 1
+    ON = 2
+    OFF = 3
     WANT_ON = 4
     WANT_OFF = 5
+
+
+class SwitchAlive(Exception):
+    pass
+
+
+class SwitchToggled(Exception):
+    pass
+
 
 class Switch:
     def __init__(self, node_id, switch_id, zwave_set_value):
         self.node_id = node_id
         self.switch_id = switch_id
         self.zwave_set_value = zwave_set_value
-        self.onoff = None
+        self.onoff = False
+        self.want_onoff = None
         self.task = asyncio.create_task(self.run())
 
         # Queue of SwitchState enums.
@@ -150,10 +159,19 @@ class Switch:
         return "Switch node_id=%r, switch_id=%r, onoff=%r" % (self.node_id, self.switch_id, self.onoff)
 
     def set_alive(self):
-        self.queue.put_nowait(SwitchState.ALIVE)
+        self.q.put_nowait(SwitchState.ALIVE)
 
-    def set_onoff(self, onoff):
-        pass
+    def set_onoff(self, v):
+        if v:
+            self.q.put_nowait(SwitchState.ON)
+        else:
+            self.q.put_nowait(SwitchState.OFF)
+
+    def set_want_onoff(self, v):
+        if v:
+            self.q.put_nowait(SwitchState.WANT_ON)
+        else:
+            self.q.put_nowait(SwitchState.WANT_OFF)
 
     async def run(self):
         try:
@@ -165,22 +183,109 @@ class Switch:
             raise
 
     async def run_or_die(self):
+        # Wait for first ALIVE.
+        try:
+            while True:
+                print("Waiting for ALIVE")
+                await self.eat_q(duration=None)
+        except SwitchAlive:
+            pass
         while True:
-            await self.q.get()
-
-    async def eat_queue(self):
-        is_alive = False
-        last_value = None
-        v = await self.q.get()
-        while True:
-            if v == SwitchState.ALIVE:
-                is_alive = True
-            else:
-                last_value = v
             try:
-                v = self.queue.pop_nowait()
-            except asyncio.QueueEmpty:
-                break
+                await self.alive_loop()
+            except SwitchAlive:
+                pass
+            except SwitchToggled:
+                print("Begin manual override")
+                while True:
+                    try:
+                        # XXX make this an argument?
+                        await self.eat_q(duration=3600.0, monitor_toggled=True)
+                    except SwitchToggled:
+                        print("Restart manual override")
+                        continue
+                    else:
+                        print("Back to automatic control")
+                        break
+
+    async def alive_loop(self):
+        # How long to ignore manual toggles after a state change.
+        DEBOUNCE = 5.0  # seconds
+
+        # Send (off 1sec, on 1sec, off) to tell humans that the switch is
+        # under automatic control.
+        print("Sending ALIVE pulse")
+        await self.send_and_ignore(False, 1.0)
+        await self.send_and_ignore(True, 1.0)
+        await self.send_and_debounce(False, DEBOUNCE)
+
+        while True:
+            # Control the switch automatically.
+            if self.want_onoff not in (None, self.onoff):
+                await self.send_and_debounce(self.want_onoff, DEBOUNCE)
+
+            # Wait for humans to mess with the switch.
+            await self.eat_q(duration=None, monitor_toggled=True)
+
+    async def send_and_ignore(self, value, duration):
+        print("send_and_ignore", value, duration)
+        self.zwave_set_value(self.switch_id, value)
+        await self.eat_q(duration=duration)
+
+    async def send_and_debounce(self, value, duration):
+        print("send_and_debounce", value, duration)
+        self.zwave_set_value(self.switch_id, value)
+        # Wait for the state to settle.
+        await self.eat_q(duration=duration)
+        # If it settled to the wrong value, blame the human.
+        if self.onoff != value:
+            raise SwitchToggled
+
+    async def eat_q(self, duration, monitor_toggled=False):
+        if duration is None:
+            # Wait indefinitely for the first event,
+            # then stop as soon as the queue is empty.
+            stop_on_empty = True
+        else:
+            # Wait until the duration expires.
+            wait_until = time.monotonic() + duration
+            stop_on_empty = False
+
+        alive = False
+        toggled = False
+
+        while True:
+            try:
+                v = await asyncio.wait_for(self.q.get(), duration)
+                print("eat_q v=", v)
+            except asyncio.TimeoutError:
+                print("eat_q timeout", alive, toggled)
+                if alive:
+                    raise SwitchAlive
+                if toggled:
+                    raise SwitchToggled
+                return
+
+            if v == SwitchState.ALIVE:
+                alive = True
+                stop_on_empty = True
+            elif v in (SwitchState.ON, SwitchState.OFF):
+                onoff = (v == SwitchState.ON)
+                print("onoff=%r" % onoff)
+                if self.onoff != onoff:
+                    self.onoff = onoff
+                    if monitor_toggled:
+                        print("TOGGLED!")
+                        toggled = True
+                        stop_on_empty = True
+            elif v in (SwitchState.WANT_ON, SwitchState.WANT_OFF):
+                self.want_onoff = (v == SwitchState.WANT_ON)
+                print("want_onoff=%r" % self.want_onoff)
+
+            if stop_on_empty:
+                duration = 0
+            else:
+                duration = wait_until - time.monotonic()
 
 
 class StateTracker:
@@ -191,6 +296,7 @@ class StateTracker:
         self._q = asyncio.Queue()
         self.switches = {}
         self.home_id = None
+        self.nodes_queried = False
 
     def threadsafe_watcher_cb(self, zwargs):
         print("%s %s" % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
@@ -202,10 +308,14 @@ class StateTracker:
         zwargs = await self.match("DriverReady")
         self.home_id = zwargs['homeId']
         await self.match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
+        self.nodes_queried = True
+        for switch in self.switches.values():
+            switch.set_alive()
 
     async def wait_for_driver_removed(self):
         await self.match("DriverRemoved")
         self.home_id = None
+        self.nodes_queried = False
         self.switches.clear()
 
     async def _q_get(self, timeout):
@@ -234,9 +344,7 @@ class StateTracker:
             except KeyError:
                 print("Unknown switch %r" % node_id)
             else:
-                switch.onoff = onoff
-                print(switch)
-                # XXX do something here
+                switch.set_onoff(onoff)
         elif ntype == "Notification" and zwargs["notificationCode"] == 6:
             node_id = zwargs["nodeId"]
             try:
@@ -244,7 +352,8 @@ class StateTracker:
             except KeyError:
                 pass
             else:
-                # TODO: something... but only after wait_for_nodes
+                if self.nodes_queried:
+                    switch.set_alive()
                 print("Switch %r alive" % node_id)
 
         return zwargs
@@ -444,6 +553,7 @@ async def co2_sub(args, co2_reader):
     options.lock()
 
     def zwave_set_value(switch_id, value):
+        #await wait_for_quiet()
         manager.setValue(switch_id, value)
 
     st = StateTracker(args.timeout, zwave_set_value)
@@ -462,6 +572,7 @@ async def co2_sub(args, co2_reader):
         manager.enablePoll(switch.switch_id)
 
     async def wait_for_quiet():
+        # XXX is this really necessary?
         old_q = None
         while True:
             q = manager.getSendQueueCount(st.home_id)
@@ -478,14 +589,13 @@ async def co2_sub(args, co2_reader):
 
     while True:
         co2 = co2_reader.co2_avg()
-        if co2 > 800:
+        if co2 > args.co2_limit:
             onoff = True
-        elif co2 < 750:
+        elif co2 < args.co2_limit - 50:
             onoff = False
 
-        await wait_for_quiet()
         for switch in st.switches.values():
-            manager.setValue(switch.switch_id, 1 if onoff else 0)
+            switch.set_want_onoff(onoff)
 
         ts = datetime.datetime.now().replace(microsecond=0).isoformat(" ")
         print("%s, %d, %d" % (ts, co2, onoff), flush=True)
@@ -507,6 +617,7 @@ def pyozw_parser():
     # Hacks
     parser.add_argument('--hard_reset', action='store_true', help='XXX', default=False)
     parser.add_argument('--co2', action='store_true', help='XXX', default=False)
+    parser.add_argument('--co2_limit', type=int, action='store', help='Enable fans when CO2 exceeds this value', default=800)
     return parser
 
 def main():
