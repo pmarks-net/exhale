@@ -194,38 +194,40 @@ class Switch:
             try:
                 await self.alive_loop()
             except SwitchAlive:
-                pass
-            except SwitchToggled:
-                print("Begin manual override")
-                while True:
-                    try:
-                        # XXX make this an argument?
-                        await self.eat_q(duration=3600.0, monitor_toggled=True)
-                    except SwitchToggled:
-                        print("Restart manual override")
-                        continue
-                    else:
-                        print("Back to automatic control")
-                        break
+                print("Rebooting alive_loop")
 
     async def alive_loop(self):
         # How long to ignore manual toggles after a state change.
         DEBOUNCE = 5.0  # seconds
 
-        # Send (off 1sec, on 1sec, off) to tell humans that the switch is
-        # under automatic control.
-        print("Sending ALIVE pulse")
-        await self.send_and_ignore(False, 1.0)
-        await self.send_and_ignore(True, 1.0)
-        await self.send_and_debounce(False, DEBOUNCE)
+        try:
+            # Send (off 1sec, on 1sec, off) to tell humans that the switch is
+            # under automatic control.
+            print("Sending ALIVE pulse")
+            await self.send_and_ignore(False, 1.0)
+            await self.send_and_ignore(True, 1.0)
+            await self.send_and_debounce(False, DEBOUNCE)
 
-        while True:
-            # Control the switch automatically.
-            if self.want_onoff not in (None, self.onoff):
-                await self.send_and_debounce(self.want_onoff, DEBOUNCE)
+            while True:
+                # Control the switch automatically.
+                if self.want_onoff not in (None, self.onoff):
+                    await self.send_and_debounce(self.want_onoff, DEBOUNCE)
 
-            # Wait for humans to mess with the switch.
-            await self.eat_q(duration=None, monitor_toggled=True)
+                # Wait for humans to mess with the switch.
+                await self.eat_q(duration=None, monitor_toggled=True)
+
+        except SwitchToggled:
+            print("Begin manual override")
+            while True:
+                try:
+                    # XXX make this an argument?
+                    await self.eat_q(duration=3600.0, monitor_toggled=True)
+                except SwitchToggled:
+                    print("Restart manual override")
+                    continue
+                else:
+                    print("Back to automatic control")
+                    break
 
     async def send_and_ignore(self, value, duration):
         print("send_and_ignore", value, duration)
