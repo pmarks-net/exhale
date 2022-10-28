@@ -245,7 +245,6 @@ class Switch:
             raise SwitchToggled
 
     async def eat_q(self, duration, monitor_toggled=False):
-        # XXX this function needs a better name.
         if duration is None:
             # Wait indefinitely for the first event,
             # then stop as soon as the queue is empty.
@@ -303,28 +302,70 @@ class StateTracker:
         self.nodes_queried = False
 
     def threadsafe_watcher_cb(self, zwargs):
-        print("watcher: %s %s" % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
+        #print(f"zwave event: {datetime.datetime.now().isoformat(sep=' ')} {zwargs}")
         self._loop.call_soon_threadsafe(lambda: self._q.put_nowait(zwargs))
 
     async def wait_for_nodes(self):
         if self.home_id is not None:
             raise AssertionError("Can't wait_for_nodes() with existing home_id")
-        zwargs = await self.match("DriverReady")
+        zwargs = await self._match("DriverReady")
         self.home_id = zwargs['homeId']
-        await self.match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
+        await self._match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
         self.nodes_queried = True
         for switch in self.switches.values():
             switch.set_alive()
 
     async def wait_for_driver_removed(self):
-        await self.match("DriverRemoved")
+        await self._match("DriverRemoved")
         self.home_id = None
         self.nodes_queried = False
         self.switches.clear()
 
+    async def wait_for_controller_state(self, cs):
+        return await self._match("ControllerCommand", "controllerState", cs)
+
+    async def wait_for_switch_added(self):
+        return await self._match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
+
+    async def wait_until(self, mono_ts):
+        while True:
+            timeout = mono_ts - time.monotonic()
+            if timeout <= 0:
+                break
+            try:
+                await self._q_get(timeout)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _match(self, notify_type, *match):
+        return await self._match_any([notify_type], *match)
+
+    async def _match_any(self, notify_types, *match):
+        if match:
+            note = " with %s=%r" % ("".join("[%r]" % m for m in match[:-1]), match[-1])
+        else:
+            note = ""
+        print("=== Waiting for %r%s ===" % (notify_types, note))
+        timeout = self._timeout
+        while True:
+            start = time.monotonic()
+            zwargs = await self._q_get(timeout=timeout)
+            timeout -= (time.monotonic() - start)
+            if zwargs["notificationType"] not in notify_types:
+                continue
+            if match:
+                z = zwargs
+                for m in match[:-1]:
+                    z = z[m]
+                if z != match[-1]:
+                    continue
+            return zwargs
+
     async def _q_get(self, timeout):
         zwargs = await asyncio.wait_for(self._q.get(), timeout=timeout)
         self._q.task_done()
+
+        # Check for events that we're always waiting for.
         ntype = zwargs["notificationType"]
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
@@ -362,36 +403,6 @@ class StateTracker:
 
         return zwargs
 
-    async def q_passive(self, timeout):
-        # XXX function needs a better name.
-        try:
-            await self._q_get(timeout)
-        except asyncio.TimeoutError:
-            pass
-
-    async def match(self, notify_type, *match):
-        return await self.match_any([notify_type], *match)
-
-    async def match_any(self, notify_types, *match):
-        if match:
-            note = " with %s=%r" % ("".join("[%r]" % m for m in match[:-1]), match[-1])
-        else:
-            note = ""
-        print("=== Waiting for %r%s ===" % (notify_types, note))
-        timeout = self._timeout
-        while True:
-            start = time.monotonic()
-            zwargs = await self._q_get(timeout=timeout)
-            timeout -= (time.monotonic() - start)
-            if zwargs["notificationType"] not in notify_types:
-                continue
-            if match:
-                z = zwargs
-                for m in match[:-1]:
-                    z = z[m]
-                if z != match[-1]:
-                    continue
-            return zwargs
 
 class Averager:
     def __init__(self, twindow):
@@ -444,7 +455,6 @@ class CO2Reader:
             self.avgr.add(now, scd.CO2)
 
             co2_avg = self.compute_co2_avg()
-            print("CO2Reader co2_avg=", co2_avg)
             self.blinker.blink_number(co2_avg // 100)
 
     def compute_co2_avg(self):
@@ -492,7 +502,7 @@ class Blinker:
                     await asyncio.sleep(sleep_time)
             while True:
                 number = await self.q.get()
-                print("Blinker", number)
+                print(f"blink {number}")
                 self.q.task_done()
                 for i in range(number):
                     if (i + 1) % 5 == 0:
@@ -541,11 +551,11 @@ async def hard_reset(args):
     # XXX probably want to add N switches here?
     print("Adding node...")
     manager.addNode(st.home_id, doSecurity=False)
-    zwargs = await st.match("ControllerCommand", "controllerState", "Waiting")
+    await st.wait_for_controller_state("Waiting")
     print(RESET_DOC)
 
-    await st.match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
-    await st.match("ControllerCommand", "controllerState", "Completed")
+    await st.wait_for_switch_added()
+    await st.wait_for_controller_state("Completed")
 
     print("Everything seems fine!")
     manager.destroy()
@@ -616,12 +626,11 @@ async def co2_sub(args, co2_reader):
         duty_1h = math.ceil(duty_1h_avgr.compute_avg() * 100)
         duty_24h = math.ceil(duty_24h_avgr.compute_avg() * 100)
 
-        ts = datetime.datetime.now().replace(microsecond=0).isoformat(" ")
+        ts = datetime.datetime.now().replace(microsecond=0).isoformat(sep=" ")
         print(f"{ts} co2={co2} onoff={int(onoff)} duty_1h={duty_1h}% duty_24h={duty_24h}%", flush=True)
 
         # Passively consume messages for a while.
-        while time.monotonic() < now + 10:
-            await st.q_passive(1.0)
+        await st.wait_until(now + 10)
 
 def pyozw_parser():
     parser = argparse.ArgumentParser(description='Run python_openzwave basics checks.')
