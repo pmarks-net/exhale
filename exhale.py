@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import collections
 import datetime
+import math
 import threading
 import time
 import traceback
@@ -244,6 +245,7 @@ class Switch:
             raise SwitchToggled
 
     async def eat_q(self, duration, monitor_toggled=False):
+        # XXX this function needs a better name.
         if duration is None:
             # Wait indefinitely for the first event,
             # then stop as soon as the queue is empty.
@@ -259,9 +261,9 @@ class Switch:
         while True:
             try:
                 v = await asyncio.wait_for(self.q.get(), duration)
-                print("eat_q v=", v)
+                #print("eat_q v=", v)
             except asyncio.TimeoutError:
-                print("eat_q timeout", alive, toggled)
+                #print("eat_q timeout", alive, toggled)
                 if alive:
                     raise SwitchAlive
                 if toggled:
@@ -273,7 +275,7 @@ class Switch:
                 stop_on_empty = True
             elif v in (SwitchState.ON, SwitchState.OFF):
                 onoff = (v == SwitchState.ON)
-                print("onoff=%r" % onoff)
+                #print("onoff=%r" % onoff)
                 if self.onoff != onoff:
                     self.onoff = onoff
                     if monitor_toggled:
@@ -282,7 +284,7 @@ class Switch:
                         stop_on_empty = True
             elif v in (SwitchState.WANT_ON, SwitchState.WANT_OFF):
                 self.want_onoff = (v == SwitchState.WANT_ON)
-                print("want_onoff=%r" % self.want_onoff)
+                #print("want_onoff=%r" % self.want_onoff)
 
             if stop_on_empty:
                 duration = 0
@@ -301,7 +303,7 @@ class StateTracker:
         self.nodes_queried = False
 
     def threadsafe_watcher_cb(self, zwargs):
-        print("%s %s" % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
+        print("watcher: %s %s" % (datetime.datetime.now().strftime("%H:%M:%S.%f"), zwargs))
         self._loop.call_soon_threadsafe(lambda: self._q.put_nowait(zwargs))
 
     async def wait_for_nodes(self):
@@ -361,6 +363,7 @@ class StateTracker:
         return zwargs
 
     async def q_passive(self, timeout):
+        # XXX function needs a better name.
         try:
             await self._q_get(timeout)
         except asyncio.TimeoutError:
@@ -390,13 +393,32 @@ class StateTracker:
                     continue
             return zwargs
 
+class Averager:
+    def __init__(self, twindow):
+        self.q = collections.deque()
+        self.twindow = twindow  # Average over this time window (seconds)
+
+    def add(self, now, value):
+        if self.q and self.q[0][0] > now:
+            raise AssertionError("must use time.monotonic()")
+
+        # Add new value, and purge values older than twindow.
+        self.q.appendleft((now, value))
+        while self.q[-1][0] <= now - self.twindow:
+            self.q.pop()
+
+    def is_fresh(self, now):
+        # Is the latest value still within the window?
+        return self.q and self.q[0][0] > now - self.twindow
+
+    def compute_avg(self):
+        return sum(value for ts, value in self.q) / (len(self.q) or 1)
+
 
 class CO2Reader:
-    WINDOW_SEC = 60
-
     def __init__(self, blinker):
         self.blinker = blinker
-        self.samples = collections.deque()
+        self.avgr = Averager(60)
         self.task = asyncio.create_task(self.run())
 
     async def run(self):
@@ -418,20 +440,18 @@ class CO2Reader:
             while not scd.data_available:
                 await asyncio.sleep(0.5)
 
-            t = time.monotonic()
-            self.samples.append((t, scd.CO2))
-            while self.samples[0][0] < t - self.WINDOW_SEC:
-                self.samples.popleft()
+            now = time.monotonic()
+            self.avgr.add(now, scd.CO2)
 
-            co2_avg = self.co2_avg()
-            print("CO2Reader", co2_avg)
+            co2_avg = self.compute_co2_avg()
+            print("CO2Reader co2_avg=", co2_avg)
             self.blinker.blink_number(co2_avg // 100)
 
-    def co2_avg(self):
-        t = time.monotonic()
-        samples = self.samples
-        if samples and samples[-1][0] >= t - self.WINDOW_SEC:
-            co2_avg = int(sum(co2 for t, co2 in samples) / len(samples))
+    def compute_co2_avg(self):
+        now = time.monotonic()
+        if self.avgr.is_fresh(now):
+            co2_avg = int(self.avgr.compute_avg())
+            # Enforce reasonable limits for the blinker.
             if co2_avg < 100:
                 co2_avg = 100
             if co2_avg > 2000:
@@ -439,6 +459,7 @@ class CO2Reader:
             return co2_avg
         else:
             return 0  # No data... this will turn off the fan.
+
 
 class Blinker:
     def __init__(self):
@@ -555,7 +576,6 @@ async def co2_sub(args, co2_reader):
     options.lock()
 
     def zwave_set_value(switch_id, value):
-        #await wait_for_quiet()
         manager.setValue(switch_id, value)
 
     st = StateTracker(args.timeout, zwave_set_value)
@@ -573,38 +593,34 @@ async def co2_sub(args, co2_reader):
     for switch in st.switches.values():
         manager.enablePoll(switch.switch_id)
 
-    async def wait_for_quiet():
-        # XXX is this really necessary?
-        old_q = None
-        while True:
-            q = manager.getSendQueueCount(st.home_id)
-            if q == 0 and old_q is None:
-                return
-            if q != old_q:
-                print("Waiting for SendQueue: %d" % q)
-            if q == 0:
-                return
-            old_q = q
-            await asyncio.sleep(0.1)
-
     onoff = False
 
+    duty_1h_avgr = Averager(1*3600)
+    duty_24h_avgr = Averager(24*3600)
+
     while True:
-        co2 = co2_reader.co2_avg()
+        co2 = co2_reader.compute_co2_avg()
         if co2 > args.co2_limit:
             onoff = True
-        elif co2 < args.co2_limit - 50:
+        elif co2 < args.co2_limit - 50:  # XXX configurable?
             onoff = False
 
         for switch in st.switches.values():
             switch.set_want_onoff(onoff)
 
+        now = time.monotonic()
+        duty_1h_avgr.add(now, onoff)
+        duty_24h_avgr.add(now, onoff)
+
+        # Round up, so any activity reports >= 1%
+        duty_1h = math.ceil(duty_1h_avgr.compute_avg() * 100)
+        duty_24h = math.ceil(duty_24h_avgr.compute_avg() * 100)
+
         ts = datetime.datetime.now().replace(microsecond=0).isoformat(" ")
-        print("%s, %d, %d" % (ts, co2, onoff), flush=True)
+        print(f"{ts} co2={co2} onoff={int(onoff)} duty_1h={duty_1h}% duty_24h={duty_24h}%", flush=True)
 
         # Passively consume messages for a while.
-        start = time.monotonic()
-        while time.monotonic() < start + 10:
+        while time.monotonic() < now + 10:
             await st.q_passive(1.0)
 
 def pyozw_parser():
