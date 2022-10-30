@@ -502,7 +502,7 @@ class Blinker:
                     await asyncio.sleep(sleep_time)
             while True:
                 number = await self.q.get()
-                print(f"blink {number}")
+                #print(f"blink {number}")
                 self.q.task_done()
                 for i in range(number):
                     if (i + 1) % 5 == 0:
