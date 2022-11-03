@@ -1,38 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-This file is part of **python-openzwave** project https://github.com/OpenZWave/python-openzwave.
-    :platform: Unix, Windows, MacOS X
 
-.. moduleauthor:: bibi21000 aka Sébastien GALLET <bibi21000@gmail.com>
-
-License : GPL(v3)
-
-**python-openzwave** is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-**python-openzwave** is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-You should have received a copy of the GNU General Public License
-along with python-openzwave. If not, see http://www.gnu.org/licenses.
-
-"""
-import logging
-h = logging.NullHandler()
-logger = logging.getLogger(__name__).addHandler(h)
 import argparse
 import asyncio
 import collections
 import datetime
 import math
+import tempfile
 import threading
 import time
 import traceback
 from enum import Enum
+
+import libopenzwave
+from openzwave.option import ZWaveOption
 
 # pip3 install adafruit-circuitpython-scd30
 import board
@@ -53,81 +33,6 @@ Join the network:
     Press up.
 """
 
-def list_nodes(args):
-    if args.timeout is None:
-        args.timeout = 60*60*4+1
-    import openzwave
-    from openzwave.node import ZWaveNode
-    from openzwave.value import ZWaveValue
-    from openzwave.scene import ZWaveScene
-    from openzwave.controller import ZWaveController
-    from openzwave.network import ZWaveNetwork
-    from openzwave.option import ZWaveOption
-
-    #Define some manager options
-    print("-------------------------------------------------------------------------------")
-    print("Define options for device {0}".format(args.device))
-    options = ZWaveOption(device=args.device, config_path=args.config_path, user_path=args.user_path)
-    options.set_log_file("/dev/null")
-    options.set_console_output(False)
-    options.lock()
-
-    print("Start network")
-    network = ZWaveNetwork(options, log=None)
-
-    delta = 0.5
-    for i in range(0, int(args.timeout/delta)):
-        time.sleep(delta)
-        if network.state >= network.STATE_AWAKED:
-            break
-
-    print("-------------------------------------------------------------------------------")
-    print("Network is awaked. Talk to controller.")
-    print("Get python_openzwave version : {}".format(network.controller.python_library_version))
-    print("Get python_openzwave config version : {}".format(network.controller.python_library_config_version))
-    print("Get python_openzwave flavor : {}".format(network.controller.python_library_flavor))
-    print("Get openzwave version : {}".format(network.controller.ozw_library_version))
-    print("Get config path : {}".format(network.controller.library_config_path))
-    print("Controller capabilities : {}".format(network.controller.capabilities))
-    print("Controller node capabilities : {}".format(network.controller.node.capabilities))
-    print("Nodes in network : {}".format(network.nodes_count))
-
-    print("-------------------------------------------------------------------------------")
-    if args.timeout > 1800:
-        print("You defined a really long timneout. Please use --help to change this feature.")
-    print("Wait for network ready ({0}s)".format(args.timeout))
-    for i in range(0, int(args.timeout/delta)):
-        time.sleep(delta)
-        if network.state == network.STATE_READY:
-            break
-    print("-------------------------------------------------------------------------------")
-    if network.state == network.STATE_READY:
-        print("Network is ready. Get nodes")
-    elif network.state == network.STATE_AWAKED:
-        print("Network is awake. Some sleeping devices may miss. You can increase timeout to get them. But will continue.")
-    else:
-        print("Network is still starting. You MUST increase timeout. But will continue.")
-
-    for node in network.nodes:
-
-        print("------------------------------------------------------------")
-        print("{} - Name : {} ( Location : {} )".format(network.nodes[node].node_id, network.nodes[node].name, network.nodes[node].location))
-        print(" {} - Ready : {} / Awake : {} / Failed : {}".format(network.nodes[node].node_id, network.nodes[node].is_ready, network.nodes[node].is_awake, network.nodes[node].is_failed))
-        print(" {} - Manufacturer : {}  ( id : {} )".format(network.nodes[node].node_id, network.nodes[node].manufacturer_name, network.nodes[node].manufacturer_id))
-        print(" {} - Product : {} ( id  : {} / type : {} / Version : {})".format(network.nodes[node].node_id, network.nodes[node].product_name, network.nodes[node].product_id, network.nodes[node].product_type, network.nodes[node].version))
-        print(" {} - Command classes : {}".format(network.nodes[node].node_id, network.nodes[node].command_classes_as_string))
-        print(" {} - Capabilities : {}".format(network.nodes[node].node_id, network.nodes[node].capabilities))
-        print(" {} - Neighbors : {} / Power level : {}".format(network.nodes[node].node_id, network.nodes[node].neighbors, network.nodes[node].get_power_level()))
-        print(" {} - Is sleeping : {} / Can wake-up : {} / Battery level : {}".format(network.nodes[node].node_id, network.nodes[node].is_sleeping, network.nodes[node].can_wake_up(), network.nodes[node].get_battery_level()))
-
-    print("------------------------------------------------------------")
-    print("Driver statistics : {}".format(network.controller.stats))
-    print("------------------------------------------------------------")
-    print("Stop network")
-    network.stop()
-    print("Exit")
-
-
 class SwitchState(Enum):
     ALIVE = 1
     ON = 2
@@ -145,10 +50,10 @@ class SwitchToggled(Exception):
 
 
 class Switch:
-    def __init__(self, node_id, switch_id, zwave_set_value):
+    def __init__(self, node_id, switch_id, manager_set_value):
         self.node_id = node_id
         self.switch_id = switch_id
-        self.zwave_set_value = zwave_set_value
+        self.manager_set_value = manager_set_value
         self.onoff = False
         self.want_onoff = None
         self.task = asyncio.create_task(self.run())
@@ -232,12 +137,12 @@ class Switch:
 
     async def send_and_ignore(self, value, duration):
         print("send_and_ignore", value, duration)
-        self.zwave_set_value(self.switch_id, value)
+        self.manager_set_value(self.switch_id, value)
         await self.eat_q(duration=duration)
 
     async def send_and_debounce(self, value, duration):
         print("send_and_debounce", value, duration)
-        self.zwave_set_value(self.switch_id, value)
+        self.manager_set_value(self.switch_id, value)
         # Wait for the state to settle.
         await self.eat_q(duration=duration)
         # If it settled to the wrong value, blame the human.
@@ -292,9 +197,8 @@ class Switch:
 
 
 class StateTracker:
-    def __init__(self, timeout, zwave_set_value):
-        self._timeout = timeout
-        self._zwave_set_value = zwave_set_value
+    def __init__(self, manager_set_value):
+        self._manager_set_value = manager_set_value
         self._loop = asyncio.get_running_loop()
         self._q = asyncio.Queue()
         self.switches = {}
@@ -310,7 +214,7 @@ class StateTracker:
             raise AssertionError("Can't wait_for_nodes() with existing home_id")
         zwargs = await self._match("DriverReady")
         self.home_id = zwargs['homeId']
-        await self._match_any(["AllNodesQueried", "AllNodesQueriedSomeDead"])
+        await self._match("AllNodesQueried|AllNodesQueriedSomeDead")
         self.nodes_queried = True
         for switch in self.switches.values():
             switch.set_alive()
@@ -319,13 +223,19 @@ class StateTracker:
         await self._match("DriverRemoved")
         self.home_id = None
         self.nodes_queried = False
+        for switch in self.switches.values():
+            switch.task.cancel()
         self.switches.clear()
 
     async def wait_for_controller_state(self, cs):
-        return await self._match("ControllerCommand", "controllerState", cs)
+        return await self._match("ControllerCommand", f"controllerState={cs}")
 
     async def wait_for_switch_added(self):
-        return await self._match("ValueAdded", "valueId", "commandClass", "COMMAND_CLASS_SWITCH_BINARY")
+        zwargs = await self._match(
+                "ValueAdded",
+                "valueId.commandClass=COMMAND_CLASS_SWITCH_BINARY",
+                timeout=15*60)  # Wait 15 minutes for user to add the switch.
+        return zwargs["valueId"]["id"]
 
     async def wait_until(self, mono_ts):
         while True:
@@ -337,27 +247,24 @@ class StateTracker:
             except asyncio.TimeoutError:
                 pass
 
-    async def _match(self, notify_type, *match):
-        return await self._match_any([notify_type], *match)
-
-    async def _match_any(self, notify_types, *match):
-        if match:
-            note = " with %s=%r" % ("".join("[%r]" % m for m in match[:-1]), match[-1])
-        else:
-            note = ""
-        print("=== Waiting for %r%s ===" % (notify_types, note))
-        timeout = self._timeout
+    # notify_types = "Type1|Type2|..."
+    # prop_chain = "a.b.c=value"
+    async def _match(self, notify_types, prop_chain=None, timeout=60):
+        notify_types = notify_types.split("|")
+        note =  f" with {prop_chain}" if prop_chain else ""
+        print(f"=== Waiting for {notify_types}{note} ===")
         while True:
             start = time.monotonic()
             zwargs = await self._q_get(timeout=timeout)
             timeout -= (time.monotonic() - start)
             if zwargs["notificationType"] not in notify_types:
                 continue
-            if match:
+            if prop_chain:
+                props, value = prop_chain.split("=")
                 z = zwargs
-                for m in match[:-1]:
+                for m in props.split("."):
                     z = z[m]
-                if z != match[-1]:
+                if z != value:
                     continue
             return zwargs
 
@@ -370,7 +277,7 @@ class StateTracker:
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
-            switch = Switch(node_id, switch_id, self._zwave_set_value)
+            switch = Switch(node_id, switch_id, self._manager_set_value)
             try:
                 self.switches[node_id].task.cancel()
                 print("Destroyed duplicate switch with node_id %r" % node_id)
@@ -515,26 +422,18 @@ class Blinker:
                         await write_n(0, 0.2)
                 await asyncio.sleep(3.0)
 
-async def hard_reset(args):
+async def hard_reset(args, user_path):
     print("hard_reset")
-    if args.timeout is None:
-        args.timeout = 60
-    import libopenzwave
-    import openzwave
-    from openzwave.option import ZWaveOption
 
-    #Define some manager options
-    print("-------------------------------------------------------------------------------")
-    print("Define options for device {0}".format(args.device))
-    options = ZWaveOption(device=args.device, config_path=args.config_path, user_path=args.user_path)
+    options = ZWaveOption(device=args.device, user_path=user_path)
     options.set_log_file("/dev/null")
     options.set_console_output(False)
     options.lock()
 
-    def zwave_set_value(switch_id, value):
-        print("zwave_set_value unimplemented here")
+    def manager_set_value(switch_id, value):
+        print("ignored manager_set_value")
 
-    st = StateTracker(args.timeout, zwave_set_value)
+    st = StateTracker(manager_set_value)
 
     manager = libopenzwave.PyManager()
     manager.create()
@@ -554,41 +453,34 @@ async def hard_reset(args):
     await st.wait_for_controller_state("Waiting")
     print(RESET_DOC)
 
-    await st.wait_for_switch_added()
+    switch_id = await st.wait_for_switch_added()
+    # Acknowledge the new switch, by turning it off.
+    manager.setValue(switch_id, False)
     await st.wait_for_controller_state("Completed")
 
     print("Everything seems fine!")
     manager.destroy()
 
 
-async def co2_main(args):
+async def co2_main(args, user_path):
     blinker = Blinker()
     co2_reader = CO2Reader(blinker)
     try:
-        await co2_sub(args, co2_reader)
+        await co2_sub(args, user_path, co2_reader)
     finally:
         blinker.task.cancel()
         co2_reader.task.cancel()
 
-async def co2_sub(args, co2_reader):
-    if args.timeout is None:
-        args.timeout = 60
-    import libopenzwave
-    import openzwave
-    from openzwave.option import ZWaveOption
-
-    #Define some manager options
-    print("-------------------------------------------------------------------------------")
-    print("Define options for device {0}".format(args.device))
-    options = ZWaveOption(device=args.device, config_path=args.config_path, user_path=args.user_path)
+async def co2_sub(args, user_path, co2_reader):
+    options = ZWaveOption(device=args.device, user_path=user_path)
     options.set_log_file("/dev/null")
     options.set_console_output(False)
     options.lock()
 
-    def zwave_set_value(switch_id, value):
+    def manager_set_value(switch_id, value):
         manager.setValue(switch_id, value)
 
-    st = StateTracker(args.timeout, zwave_set_value)
+    st = StateTracker(manager_set_value)
 
     manager = libopenzwave.PyManager()
     manager.create()
@@ -633,29 +525,24 @@ async def co2_sub(args, co2_reader):
         await st.wait_until(now + 10)
 
 def pyozw_parser():
-    parser = argparse.ArgumentParser(description='Run python_openzwave basics checks.')
+    parser = argparse.ArgumentParser(description='XXX')
     parser.add_argument('-d', '--device', action='store', help='The device port', default=None)
-    parser.add_argument('-l', '--list_nodes', action='store_true', help='List the nodes on zwave network', default=False)
     parser.add_argument('-t', '--timeout', action='store',type=int, help='The default timeout for zwave network sniffing', default=None)
-    parser.add_argument('--config_path', action='store', help='The config_path for openzwave', default=None)
-    parser.add_argument('--user_path', action='store', help='The user_path for openzwave', default=".")
-
-
-    # Hacks
     parser.add_argument('--hard_reset', action='store_true', help='XXX', default=False)
     parser.add_argument('--co2', action='store_true', help='XXX', default=False)
     parser.add_argument('--co2_limit', type=int, action='store', help='Enable fans when CO2 exceeds this value', default=800)
     return parser
 
 def main():
-    parser = pyozw_parser()
-    args = parser.parse_args()
-    if args.list_nodes:
-        list_nodes(args)
-    elif args.hard_reset:
-        asyncio.run(hard_reset(args))
-    elif args.co2:
-        asyncio.run(co2_main(args))
+    with tempfile.TemporaryDirectory(prefix="exhale-userpath-") as user_path:
+        parser = pyozw_parser()
+        args = parser.parse_args()
+        if args.hard_reset:
+            asyncio.run(hard_reset(args, user_path))
+        elif args.co2:
+            asyncio.run(co2_main(args, user_path))
+        else:
+            raise AssertionError("Usage: XXX")
 
 if __name__ == '__main__':
     main()
