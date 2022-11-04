@@ -182,6 +182,11 @@ class Switch:
                 duration = wait_until - time.monotonic()
 
 
+def is_a_switch(zwargs):
+    return (zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY" and
+            zwargs["valueId"]["index"] == 0)
+
+
 class StateTracker:
     def __init__(self, manager_set_value, manual_secs):
         self._manager_set_value = manager_set_value
@@ -215,12 +220,12 @@ class StateTracker:
         self.switches.clear()
 
     async def wait_for_controller_state(self, cs):
-        return await self._match("ControllerCommand", f"controllerState={cs}")
+        return await self._match("ControllerCommand", lambda z: z["controllerState"] == cs)
 
     async def wait_for_switch_added(self):
         zwargs = await self._match(
                 "ValueAdded",
-                "valueId.commandClass=COMMAND_CLASS_SWITCH_BINARY",
+                is_a_switch,
                 timeout=15*60)  # Wait 15 minutes for user to add the switch.
         return zwargs["valueId"]["id"]
 
@@ -235,10 +240,10 @@ class StateTracker:
                 pass
 
     # notify_types = "Type1|Type2|..."
-    # prop_chain = "a.b.c=value"
-    async def _match(self, notify_types, prop_chain=None, timeout=60):
+    # zwargs_matcher = f(zwargs) -> True if match.
+    async def _match(self, notify_types, zwargs_matcher=None, timeout=60):
         notify_types = notify_types.split("|")
-        note =  f" with {prop_chain}" if prop_chain else ""
+        note =  " with zwargs_matcher" if zwargs_matcher else ""
         print(f"=== Waiting for {notify_types}{note} ===")
         while True:
             start = time.monotonic()
@@ -246,13 +251,8 @@ class StateTracker:
             timeout -= (time.monotonic() - start)
             if zwargs["notificationType"] not in notify_types:
                 continue
-            if prop_chain:
-                props, value = prop_chain.split("=")
-                z = zwargs
-                for m in props.split("."):
-                    z = z[m]
-                if z != value:
-                    continue
+            if zwargs_matcher and not zwargs_matcher(zwargs):
+                continue
             return zwargs
 
     async def _q_get(self, timeout):
@@ -261,7 +261,7 @@ class StateTracker:
 
         # Check for events that we're always waiting for.
         ntype = zwargs["notificationType"]
-        if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
+        if ntype == "ValueAdded" and is_a_switch(zwargs):
             node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
             switch = Switch(node_id, switch_id, self._manager_set_value, self._manual_secs)
@@ -272,7 +272,7 @@ class StateTracker:
                 pass
             self.switches[node_id] = switch
             print(f"Tracking {switch}")
-        elif ntype == "ValueChanged" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
+        elif ntype == "ValueChanged" and is_a_switch(zwargs):
             node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
             onoff = zwargs["valueId"]["value"]
@@ -424,6 +424,9 @@ async def hard_reset(args):
 
     await st.wait_for_nodes()
 
+    print("Sleeping for 5 seconds...")
+    await st.wait_until(time.monotonic() + 5)
+
     print("Resetting controller...")
     manager.resetController(st.home_id)
     await st.wait_for_driver_removed()
@@ -436,11 +439,11 @@ async def hard_reset(args):
         print(f"\n!!! Please add switch #{i+1} of {args.switches}.\nAssuming you have an UltraPro Z-Wave toggle switch in the factory-reset state, just press 'up'.\n")
 
         switch_id = await st.wait_for_switch_added()
-        await st.wait_for_controller_state("Completed")
-
         # Acknowledge the new switch, by turning it off.
         manager.setValue(switch_id, False)
 
+    print("Sleeping for 5 seconds...")
+    await st.wait_until(time.monotonic() + 5)
     print("Destroying...")
     manager.destroy()
     print("Done!")
@@ -552,6 +555,7 @@ def main():
         options.addOptionString("LogFileName", "stdout.log", False)
         options.addOptionInt("SaveLogLevel", 4)  # 4=Error
         options.addOptionBool("ConsoleOutput", False)
+        options.addOptionBool("AutoUpdateConfigFile", False)
         options.lock()
 
         asyncio.run(args.func(args))
