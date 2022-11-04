@@ -6,7 +6,6 @@ import collections
 import datetime
 import math
 import tempfile
-import threading
 import time
 import traceback
 from enum import Enum
@@ -16,22 +15,12 @@ from openzwave.option import ZWaveOption
 
 # pip3 install adafruit-circuitpython-scd30
 import board
-import busio
 import adafruit_scd30
 
 # pip3 install adafruit-extended-bus
 # dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10
 import adafruit_extended_bus
 
-RESET_DOC = """
-Tips for my UltraPro Z-Wave toggle switch:
-
-Factory reset (run --hard_reset *after* this step):
-    Quickly press up up up down down down.
-
-Join the network:
-    Press up.
-"""
 
 class SwitchState(Enum):
     ALIVE = 1
@@ -50,10 +39,11 @@ class SwitchToggled(Exception):
 
 
 class Switch:
-    def __init__(self, node_id, switch_id, manager_set_value):
+    def __init__(self, node_id, switch_id, manager_set_value, manual_secs):
         self.node_id = node_id
         self.switch_id = switch_id
         self.manager_set_value = manager_set_value
+        self.manual_secs = manual_secs
         self.onoff = False
         self.want_onoff = None
         self.task = asyncio.create_task(self.run())
@@ -92,7 +82,6 @@ class Switch:
         # Wait for first ALIVE.
         try:
             while True:
-                print("Waiting for ALIVE")
                 await self.eat_q(duration=None)
         except SwitchAlive:
             pass
@@ -123,13 +112,12 @@ class Switch:
                 await self.eat_q(duration=None, monitor_toggled=True)
 
         except SwitchToggled:
-            print("Begin manual override")
+            print(f"Begin manual override ({self.manual_secs}s)")
             while True:
                 try:
-                    # XXX make this an argument?
-                    await self.eat_q(duration=3600.0, monitor_toggled=True)
+                    await self.eat_q(duration=self.manual_secs, monitor_toggled=True)
                 except SwitchToggled:
-                    print("Restart manual override")
+                    print(f"Restart manual override ({self.manual_secs}s)")
                     continue
                 else:
                     print("Back to automatic control")
@@ -197,32 +185,33 @@ class Switch:
 
 
 class StateTracker:
-    def __init__(self, manager_set_value):
+    def __init__(self, manager_set_value, manual_secs):
         self._manager_set_value = manager_set_value
+        self._manual_secs = manual_secs
         self._loop = asyncio.get_running_loop()
         self._q = asyncio.Queue()
+        self._nodes_queried = False
         self.switches = {}
         self.home_id = None
-        self.nodes_queried = False
 
     def threadsafe_watcher_cb(self, zwargs):
-        #print(f"zwave event: {datetime.datetime.now().isoformat(sep=' ')} {zwargs}")
+        #print(f"zwave event: {datetime.datetime.now().isoformat(sep=" ")} {zwargs}")
         self._loop.call_soon_threadsafe(lambda: self._q.put_nowait(zwargs))
 
     async def wait_for_nodes(self):
         if self.home_id is not None:
             raise AssertionError("Can't wait_for_nodes() with existing home_id")
         zwargs = await self._match("DriverReady")
-        self.home_id = zwargs['homeId']
+        self.home_id = zwargs["homeId"]
         await self._match("AllNodesQueried|AllNodesQueriedSomeDead")
-        self.nodes_queried = True
+        self._nodes_queried = True
         for switch in self.switches.values():
             switch.set_alive()
 
     async def wait_for_driver_removed(self):
         await self._match("DriverRemoved")
         self.home_id = None
-        self.nodes_queried = False
+        self._nodes_queried = False
         for switch in self.switches.values():
             switch.task.cancel()
         self.switches.clear()
@@ -277,14 +266,14 @@ class StateTracker:
         if ntype == "ValueAdded" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
-            switch = Switch(node_id, switch_id, self._manager_set_value)
+            switch = Switch(node_id, switch_id, self._manager_set_value, self._manual_secs)
             try:
                 self.switches[node_id].task.cancel()
                 print("Destroyed duplicate switch with node_id %r" % node_id)
             except KeyError:
                 pass
-            print("Adding %s" % switch)
             self.switches[node_id] = switch
+            print(f"Tracking {switch}")
         elif ntype == "ValueChanged" and zwargs["valueId"]["commandClass"] == "COMMAND_CLASS_SWITCH_BINARY":
             node_id = zwargs["nodeId"]
             switch_id = zwargs["valueId"]["id"]
@@ -304,7 +293,7 @@ class StateTracker:
             except KeyError:
                 pass
             else:
-                if self.nodes_queried:
+                if self._nodes_queried:
                     switch.set_alive()
                 print("Switch %r alive" % node_id)
 
@@ -422,23 +411,17 @@ class Blinker:
                         await write_n(0, 0.2)
                 await asyncio.sleep(3.0)
 
-async def hard_reset(args, user_path):
-    print("hard_reset")
-
-    options = ZWaveOption(device=args.device, user_path=user_path)
-    options.set_log_file("/dev/null")
-    options.set_console_output(False)
-    options.lock()
-
+async def hard_reset(args):
     def manager_set_value(switch_id, value):
         print("ignored manager_set_value")
 
-    st = StateTracker(manager_set_value)
+    manual_secs = 60  # value is irrelevant
+    st = StateTracker(manager_set_value, manual_secs)
 
     manager = libopenzwave.PyManager()
     manager.create()
     manager.addWatcher(st.threadsafe_watcher_cb)
-    manager.addDriver(args.device)
+    manager.addDriver(args.zdevice)
 
     await st.wait_for_nodes()
 
@@ -447,45 +430,43 @@ async def hard_reset(args, user_path):
     await st.wait_for_driver_removed()
     await st.wait_for_nodes()
 
-    # XXX probably want to add N switches here?
-    print("Adding node...")
-    manager.addNode(st.home_id, doSecurity=False)
-    await st.wait_for_controller_state("Waiting")
-    print(RESET_DOC)
+    for i in range(args.switches):
+        print("Adding node...")
+        manager.addNode(st.home_id, doSecurity=False)
+        await st.wait_for_controller_state("Waiting")
+        print(f"\n!!! Please add switch #{i+1} of {args.switches}.\nAssuming you have an UltraPro Z-Wave toggle switch in the factory-reset state, just press 'up'.\n")
 
-    switch_id = await st.wait_for_switch_added()
-    # Acknowledge the new switch, by turning it off.
-    manager.setValue(switch_id, False)
-    await st.wait_for_controller_state("Completed")
+        switch_id = await st.wait_for_switch_added()
+        await st.wait_for_controller_state("Completed")
 
-    print("Everything seems fine!")
+        # Acknowledge the new switch, by turning it off.
+        manager.setValue(switch_id, False)
+
+    print("Destroying...")
     manager.destroy()
+    print("Done!")
 
 
-async def co2_main(args, user_path):
+async def co2_main(args):
     blinker = Blinker()
     co2_reader = CO2Reader(blinker)
     try:
-        await co2_sub(args, user_path, co2_reader)
+        await co2_sub(args, co2_reader)
     finally:
         blinker.task.cancel()
         co2_reader.task.cancel()
 
-async def co2_sub(args, user_path, co2_reader):
-    options = ZWaveOption(device=args.device, user_path=user_path)
-    options.set_log_file("/dev/null")
-    options.set_console_output(False)
-    options.lock()
+async def co2_sub(args, co2_reader):
 
     def manager_set_value(switch_id, value):
         manager.setValue(switch_id, value)
 
-    st = StateTracker(manager_set_value)
+    st = StateTracker(manager_set_value, args.manual)
 
     manager = libopenzwave.PyManager()
     manager.create()
     manager.addWatcher(st.threadsafe_watcher_cb)
-    manager.addDriver(args.device)
+    manager.addDriver(args.zdevice)
 
     await st.wait_for_nodes()
     print("Active switch count: %d" % len(st.switches))
@@ -504,7 +485,7 @@ async def co2_sub(args, user_path, co2_reader):
         co2 = co2_reader.compute_co2_avg()
         if co2 > args.co2_limit:
             onoff = True
-        elif co2 < args.co2_limit - 50:  # XXX configurable?
+        elif co2 < args.co2_limit - args.co2_diff:
             onoff = False
 
         for switch in st.switches.values():
@@ -524,26 +505,50 @@ async def co2_sub(args, user_path, co2_reader):
         # Passively consume messages for a while.
         await st.wait_until(now + 10)
 
-def pyozw_parser():
-    parser = argparse.ArgumentParser(description='XXX')
-    parser.add_argument('-d', '--device', action='store', help='The device port', default=None)
-    parser.add_argument('-t', '--timeout', action='store',type=int, help='The default timeout for zwave network sniffing', default=None)
-    parser.add_argument('--hard_reset', action='store_true', help='XXX', default=False)
-    parser.add_argument('--co2', action='store_true', help='XXX', default=False)
-    parser.add_argument('--co2_limit', type=int, action='store', help='Enable fans when CO2 exceeds this value', default=800)
-    return parser
+
+# https://stackoverflow.com/questions/20094215/argparse-subparser-monolithic-help-output
+class _HelpAction(argparse._HelpAction):
+    def __call__(self, parser, namespace, values, option_string=None):
+        subparsers_actions = [
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)]
+        for subparsers_action in subparsers_actions:
+            # get all subparsers and print help
+            for choice, subparser in subparsers_action.choices.items():
+                print(f"=== subcommand '{choice}' ===")
+                subparser.print_help()
+                print()
+        parser.exit()
+
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    subparsers = parser.add_subparsers(dest="subcommand")
+    parser.add_argument('-h', '--help', action=_HelpAction)
+
+    parser_reset = subparsers.add_parser("reset", description="Reinitialize the ZWave network. Before running this command, all switches must be in the 'factory reset' state. To factory reset an UltraPro Z-Wave toggle switch, quickly press 'up up up down down down'. Later when prompted, press 'up' to add each switch to the ZWave network.")
+    parser_reset.add_argument("--zdevice", help="ZWave serial device", required=True, metavar="/dev/ttyX")
+    parser_reset.add_argument("--switches", type=int, help="Number of switches to add", required=True, metavar="N")
+    parser_reset.set_defaults(func=hard_reset)
+
+    parser_co2 = subparsers.add_parser("co2", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
+    parser_co2.add_argument("--zdevice", help="ZWave serial device", required=True, metavar="/dev/ttyX")
+    parser_co2.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=800, metavar="800")
+    parser_co2.add_argument("--co2_diff", type=int, help="Disable fan when CO₂ level falls below (limit-diff)", default=50, metavar="50")
+    parser_co2.add_argument("--manual", type=int, help="When a switch is toggled manually, disable automatic control for this many seconds", default=3600, metavar="3600")
+    parser_co2.set_defaults(func=co2_main)
+
+    args = parser.parse_args()
+    if not args.subcommand:
+        return _HelpAction(None)(parser, None, None)
+
     with tempfile.TemporaryDirectory(prefix="exhale-userpath-") as user_path:
-        parser = pyozw_parser()
-        args = parser.parse_args()
-        if args.hard_reset:
-            asyncio.run(hard_reset(args, user_path))
-        elif args.co2:
-            asyncio.run(co2_main(args, user_path))
-        else:
-            raise AssertionError("Usage: XXX")
+        options = ZWaveOption(device=args.zdevice, user_path=user_path)
+        options.set_log_file("/dev/null")
+        options.set_console_output(False)
+        options.lock()
+        asyncio.run(args.func(args))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
-
