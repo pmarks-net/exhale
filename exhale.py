@@ -5,20 +5,18 @@ import asyncio
 import collections
 import datetime
 import math
+import os
 import tempfile
 import time
 import traceback
 from enum import Enum
 
 import libopenzwave
-from openzwave.option import ZWaveOption
 
 # pip3 install adafruit-circuitpython-scd30
-import board
 import adafruit_scd30
 
 # pip3 install adafruit-extended-bus
-# dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10
 import adafruit_extended_bus
 
 
@@ -195,7 +193,7 @@ class StateTracker:
         self.home_id = None
 
     def threadsafe_watcher_cb(self, zwargs):
-        #print(f"zwave event: {datetime.datetime.now().isoformat(sep=" ")} {zwargs}")
+        #print(f"zwave event: {datetime.datetime.now().isoformat(sep=' ')} {zwargs}")
         self._loop.call_soon_threadsafe(lambda: self._q.put_nowait(zwargs))
 
     async def wait_for_nodes(self):
@@ -323,8 +321,9 @@ class Averager:
 
 
 class CO2Reader:
-    def __init__(self, blinker):
+    def __init__(self, blinker, scd30_i2c):
         self.blinker = blinker
+        self.scd30_i2c = scd30_i2c
         self.avgr = Averager(60)
         self.task = asyncio.create_task(self.run())
 
@@ -340,7 +339,7 @@ class CO2Reader:
 
     async def reader_loop(self):
         #i2c = board.I2C()   # uses board.SCL and board.SDA
-        i2c = adafruit_extended_bus.ExtendedI2C(6)
+        i2c = adafruit_extended_bus.ExtendedI2C(self.scd30_i2c)
         scd = adafruit_scd30.SCD30(i2c)
 
         while True:
@@ -449,7 +448,7 @@ async def hard_reset(args):
 
 async def co2_main(args):
     blinker = Blinker()
-    co2_reader = CO2Reader(blinker)
+    co2_reader = CO2Reader(blinker, args.scd30_i2c)
     try:
         await co2_sub(args, co2_reader)
     finally:
@@ -533,6 +532,9 @@ def main():
 
     parser_co2 = subparsers.add_parser("co2", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
     parser_co2.add_argument("--zdevice", help="ZWave serial device", required=True, metavar="/dev/ttyX")
+    parser_co2.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N; requires (e.g.) dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10", default=6, metavar="6")
+
+
     parser_co2.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=800, metavar="800")
     parser_co2.add_argument("--co2_diff", type=int, help="Disable fan when CO₂ level falls below (limit-diff)", default=50, metavar="50")
     parser_co2.add_argument("--manual", type=int, help="When a switch is toggled manually, disable automatic control for this many seconds", default=3600, metavar="3600")
@@ -543,10 +545,15 @@ def main():
         return _HelpAction(None)(parser, None, None)
 
     with tempfile.TemporaryDirectory(prefix="exhale-userpath-") as user_path:
-        options = ZWaveOption(device=args.zdevice, user_path=user_path)
-        options.set_log_file("/dev/null")
-        options.set_console_output(False)
+        # Log here to get console output without colors.
+        os.symlink("/dev/stdout", os.path.join(user_path, "stdout.log"))
+
+        options = libopenzwave.PyOptions(user_path=user_path)
+        options.addOptionString("LogFileName", "stdout.log", False)
+        options.addOptionInt("SaveLogLevel", 4)  # 4=Error
+        options.addOptionBool("ConsoleOutput", False)
         options.lock()
+
         asyncio.run(args.func(args))
 
 
