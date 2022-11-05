@@ -343,11 +343,18 @@ class CO2Reader:
         scd = adafruit_scd30.SCD30(i2c)
 
         while True:
-            while not scd.data_available:
+            if not scd.data_available:
                 await asyncio.sleep(0.5)
+                continue
+
+            co2 = scd.CO2
+            if co2 is None or not math.isfinite(co2):
+                print(f"ignored co2={co2}")
+                await asyncio.sleep(0.5)
+                continue
 
             now = time.monotonic()
-            self.avgr.add(now, scd.CO2)
+            self.avgr.add(now, co2)
 
             co2_avg = self.compute_co2_avg()
             self.blinker.blink_number(co2_avg // 100)
@@ -529,12 +536,12 @@ def main():
     parser.add_argument('-h', '--help', action=_HelpAction)
 
     parser_reset = subparsers.add_parser("reset", description="Reinitialize the ZWave network. Before running this command, all switches must be in the 'factory reset' state. To factory reset an UltraPro Z-Wave toggle switch, quickly press 'up up up down down down'. Later when prompted, press 'up' to add each switch to the ZWave network.")
-    parser_reset.add_argument("--zdevice", help="ZWave serial device", required=True, metavar="/dev/ttyX")
+    parser_reset.add_argument("--zdevice", help="ZWave serial device", default="/dev/ttyS0", metavar="/dev/ttyS0")
     parser_reset.add_argument("--switches", type=int, help="Number of switches to add", required=True, metavar="N")
     parser_reset.set_defaults(func=hard_reset)
 
     parser_co2 = subparsers.add_parser("co2", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
-    parser_co2.add_argument("--zdevice", help="ZWave serial device", required=True, metavar="/dev/ttyX")
+    parser_co2.add_argument("--zdevice", help="ZWave serial device", default="/dev/ttyS0", metavar="/dev/ttyS0")
     parser_co2.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N; requires (e.g.) dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10", default=6, metavar="6")
 
 
