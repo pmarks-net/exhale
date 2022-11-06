@@ -82,3 +82,7 @@ My goal is to connect a CO2 sensor and Z-wave controller to a Raspberry Pi, and 
   ```
 
 - Enable overlay file system, for read-only SD card: https://learn.adafruit.com/read-only-raspberry-pi
+
+## Photos
+- To see the red LED through the lid, drill a small hole and fill with hot glue. Here it is blinking 7 times for >=700 ppm. Every fifth blink is slower:  
+  ![Red LED blinking 7 times](./misc/blink7.gif)
