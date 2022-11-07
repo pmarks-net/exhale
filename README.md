@@ -1,17 +1,17 @@
 # exhale
-CO2 monitor with Z-wave fan control for Raspberry Pi
+Ventilating your home keeps the air fresh, but too much ventilation wastes energy.
 
-My goal is to connect a CO2 sensor and Z-wave controller to a Raspberry Pi, and run the bathroom exhaust fan whenever CO2 levels are high. The device should operate with a read-only filesystem and no internet access.
+This project controls a bathroom vent fan using a Z-wave smart switch, providing "just enough" ventilation to maintain a target CO₂ level. The code runs on a Raspberry Pi with no network access and a read-only filesystem.
 
 ## Hardware I'm using
-- Raspberry Pi 3 B+
-- CanaKit Premium Black Case hot glued to a MicroUSB power supply
-- HUSBZ-1 USB Z-wave controller or Z-Wave.Me RaZberry2
-- Adafruit SCD-30 CO2 sensor
 - UltraPro Z-Wave Plus toggle switch
+- Raspberry Pi 3 B+ (TODO: experiment with "Le Potato" AML-S905X-CC)
+- Adafruit SCD-30 CO2 sensor + STEMMA QT with female sockets
+- Z-Wave.Me RaZberry2 (also tested with HUSBZ-1 USB Z-wave controller)
+- CanaKit Premium Black Case
+- CanaKit MicroUSB power supply
 
-## How to install
-- TODO: Pin diagram
+## Software installation
 - Burn Raspberry Pi OS Lite to an SD card
 - Configure WiFi and/or SSH if desired
 - Install random stuff:
@@ -29,17 +29,17 @@ My goal is to connect a CO2 sensor and Z-wave controller to a Raspberry Pi, and 
   ./setup-lib.py install --user --flavor=shared
   ```
 
-- Add stuff to `/boot/config.txt`:
+- Configure GPIO pins:
   ```
   # /dev/ttyS0 (zwave controller) on GPIO 2-3:
-  enable_uart=1
+  sudo raspi-config nonint do_serial 2
   # /dev/i2c-6 (scd30) on GPIO 9-10:
-  dtparam=i2c_arm=on
-  dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10
+  sudo raspi-config nonint do_i2c 0
+  echo 'dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10' | sudo tee -a /boot/config.txt
   ```
 
 - Make `./exhale.py reset` work, followed by `./exhale.py co2`:
-  ```shell
+  ```
   $ git clone https://github.com/pmarks-net/exhale.git
   $ cd exhale
   $ ./exhale.py --help
@@ -84,13 +84,13 @@ My goal is to connect a CO2 sensor and Z-wave controller to a Raspberry Pi, and 
 - Enable overlay file system, for read-only SD card: https://learn.adafruit.com/read-only-raspberry-pi
 
 ## Photos
-- Insulate behind the SCD30 with electrical tape:  
+- Attach the RaZberry and SCD30 as shown; insulate behind the SCD30 with electrical tape:  
   ![](./misc/scd30_backside.jpg)  
 - Everything fits in the case when positioned like this:
   ![](./misc/everything_fits.jpg)
-- Hot glue the RPi case to a power supply for wall mounting somewhere within Z-wave range of the switch:  
-  ![](./misc/wall_mount.jpg)
 - The only building modification is a Z-wave smart switch controlling the bathroom vent fan:  
   ![](./misc/smart_switch.jpg)
-- To see the red LED (faintly), drill a hole in the lid and fill with hot glue. Here it is blinking 7 times for >=700 ppm. Every fifth blink is slower:  
-  <img src="./misc/blink7.gif" width=640>
+- Hot glue the RPi case to a power supply for wall mounting somewhere within Z-wave range of the switch:  
+  ![](./misc/wall_mount.jpg)
+- To see the red LED (faintly), drill a hole in the lid and fill with hot glue. Here it is blinking 8 times for >=800 ppm. Every fifth blink is slower:  
+  ![](./misc/blink8.gif)
