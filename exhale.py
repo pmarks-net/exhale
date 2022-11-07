@@ -321,6 +321,26 @@ class Averager:
 
 
 class CO2Reader:
+    def __init__(self, scd30_i2c):
+        i2c = adafruit_extended_bus.ExtendedI2C(scd30_i2c)
+        self.scd = adafruit_scd30.SCD30(i2c)
+
+    async def read(self):
+        while True:
+            if not self.scd.data_available:
+                await asyncio.sleep(0.5)
+                continue
+
+            co2 = self.scd.CO2
+            if co2 is None or not math.isfinite(co2):
+                print(f"ignored co2={co2}")
+                await asyncio.sleep(0.5)
+                continue
+
+            return co2
+
+
+class CO2Tracker:
     def __init__(self, blinker, scd30_i2c):
         self.blinker = blinker
         self.scd30_i2c = scd30_i2c
@@ -334,25 +354,14 @@ class CO2Reader:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                print("CO2Reader failed:", e)
+                print("CO2Tracker failed:", e)
                 await asyncio.sleep(1.0)
 
     async def reader_loop(self):
-        #i2c = board.I2C()   # uses board.SCL and board.SDA
-        i2c = adafruit_extended_bus.ExtendedI2C(self.scd30_i2c)
-        scd = adafruit_scd30.SCD30(i2c)
+        reader = CO2Reader(self.scd30_i2c)
 
         while True:
-            if not scd.data_available:
-                await asyncio.sleep(0.5)
-                continue
-
-            co2 = scd.CO2
-            if co2 is None or not math.isfinite(co2):
-                print(f"ignored co2={co2}")
-                await asyncio.sleep(0.5)
-                continue
-
+            co2 = await reader.read()
             now = time.monotonic()
             self.avgr.add(now, co2)
 
@@ -376,6 +385,7 @@ class CO2Reader:
 class Blinker:
     def __init__(self):
         self.q = asyncio.Queue(maxsize=1)
+        self.hz = None
         self.task = asyncio.create_task(self.run())
 
     def blink_number(self, number):
@@ -383,6 +393,10 @@ class Blinker:
             self.q.put_nowait(number)
         except asyncio.QueueFull:
             pass
+        self.hz = None
+
+    def blink_hz(self, hz):
+        self.hz = hz
 
     async def run(self):
         try:
@@ -403,6 +417,12 @@ class Blinker:
                 if sleep_time is not None:
                     await asyncio.sleep(sleep_time)
             while True:
+                if self.hz:
+                    # Blink continuously.
+                    await write_n(1, 0.5 / self.hz)
+                    await write_n(0, 0.5 / self.hz)
+                    continue
+
                 number = await self.q.get()
                 #print(f"blink {number}")
                 self.q.task_done()
@@ -416,6 +436,7 @@ class Blinker:
                         await write_n(1, 0.1)
                         await write_n(0, 0.2)
                 await asyncio.sleep(3.0)
+
 
 async def hard_reset(args):
     def manager_set_value(switch_id, value):
@@ -456,16 +477,45 @@ async def hard_reset(args):
     print("Done!")
 
 
+async def calibrate(args):
+    blinker = Blinker()
+    reader = CO2Reader(args.scd30_i2c)
+
+    target = time.monotonic() + 120  # calibrate in 2 minutes
+    blinker.blink_hz(0.5)  # blink slowly
+    ppm = args.scd30_ppm
+    info = f"(scd30_ppm={ppm})" if ppm else "(dry_run)"
+
+    print("SCD30 calibration mode")
+
+    while True:
+        co2 = int(await reader.read())
+        remain = max(0, math.ceil(target - time.monotonic()))
+        print(f"co2={co2}, calibrate in {remain}s {info}")
+        if remain <= 0:
+            break
+
+    print("Calibrating!")
+    if ppm:
+        reader.scd.self_calibration_enabled = False
+        reader.scd.forced_recalibration_reference = ppm
+    blinker.blink_hz(5)  # blink quickly
+
+    while True:
+        co2 = int(await reader.read())
+        print(f"co2={co2}, calibrated {info}")
+
+
 async def co2_main(args):
     blinker = Blinker()
-    co2_reader = CO2Reader(blinker, args.scd30_i2c)
+    co2_tracker = CO2Tracker(blinker, args.scd30_i2c)
     try:
-        await co2_sub(args, co2_reader)
+        await co2_sub(args, co2_tracker)
     finally:
         blinker.task.cancel()
-        co2_reader.task.cancel()
+        co2_tracker.task.cancel()
 
-async def co2_sub(args, co2_reader):
+async def co2_sub(args, co2_tracker):
 
     def manager_set_value(switch_id, value):
         manager.setValue(switch_id, value)
@@ -491,7 +541,7 @@ async def co2_sub(args, co2_reader):
     duty_24h_avgr = Averager(24*3600)
 
     while True:
-        co2 = co2_reader.compute_co2_avg()
+        co2 = co2_tracker.compute_co2_avg()
         if co2 > args.co2_limit:
             onoff = True
         elif co2 < args.co2_limit - args.co2_diff:
@@ -540,11 +590,14 @@ def main():
     parser_reset.add_argument("--switches", type=int, help="Number of switches to add", required=True, metavar="N")
     parser_reset.set_defaults(func=hard_reset)
 
+    parser_cal = subparsers.add_parser("calibrate", description="Calibrate the SCD30 CO₂ sensor in outdoor air. LED will blink slow for 2 minutes, calibrate, then blink quickly.")
+    parser_cal.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N", default=6, metavar="6")
+    parser_cal.add_argument("--scd30_ppm", type=int, help="Outdoor CO₂ ppm (default=dry_run)", default=None, metavar="PPM")
+    parser_cal.set_defaults(func=calibrate)
+
     parser_co2 = subparsers.add_parser("co2", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
     parser_co2.add_argument("--zdevice", help="ZWave serial device", default="/dev/ttyS0", metavar="/dev/ttyS0")
     parser_co2.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N; requires (e.g.) dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10", default=6, metavar="6")
-
-
     parser_co2.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=800, metavar="800")
     parser_co2.add_argument("--co2_diff", type=int, help="Disable fan when CO₂ level falls below (limit-diff)", default=50, metavar="50")
     parser_co2.add_argument("--manual", type=int, help="When a switch is toggled manually, disable automatic control for this many seconds", default=3600, metavar="3600")
