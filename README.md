@@ -84,5 +84,13 @@ My goal is to connect a CO2 sensor and Z-wave controller to a Raspberry Pi, and 
 - Enable overlay file system, for read-only SD card: https://learn.adafruit.com/read-only-raspberry-pi
 
 ## Photos
-- To see the red LED through the lid, drill a small hole and fill with hot glue. Here it is blinking 7 times for >=700 ppm. Every fifth blink is slower:  
-  ![Red LED blinking 7 times](./misc/blink7.gif)
+- Insulate behind the SCD30 with electrical tape:  
+  ![](./misc/scd30_backside.jpg)  
+- Everything fits in the case when positioned like this:
+  ![](./misc/everything_fits.jpg)
+- Hot glue the RPi case to a power supply for wall mounting somewhere within Z-wave range of the switch:  
+  ![](./misc/wall_mount.jpg)
+- The only building modification is a Z-wave smart switch controlling the bathroom vent fan:  
+  ![](./misc/smart_switch.jpg)
+- To see the red LED (faintly), drill a hole in the lid and fill with hot glue. Here it is blinking 7 times for >=700 ppm. Every fifth blink is slower:  
+  <img src="./misc/blink7.gif" width=640>
