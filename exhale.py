@@ -539,6 +539,7 @@ async def co2_sub(args, co2_tracker):
 
     duty_1h_avgr = Averager(1*3600)
     duty_24h_avgr = Averager(24*3600)
+    last_uniq = None
 
     while True:
         co2 = co2_tracker.compute_co2_avg()
@@ -558,11 +559,20 @@ async def co2_sub(args, co2_tracker):
         duty_1h = math.ceil(duty_1h_avgr.compute_avg() * 100)
         duty_24h = math.ceil(duty_24h_avgr.compute_avg() * 100)
 
-        ts = datetime.datetime.now().replace(microsecond=0).isoformat(sep=" ")
-        print(f"{ts} co2={co2} onoff={int(onoff)} duty_1h={duty_1h}% duty_24h={duty_24h}%", flush=True)
+        # Log every 5 minutes, or when onoff changes.
+        dt_now = datetime.datetime.now()
+        dt5 = dt_now - datetime.timedelta(
+                minutes=dt_now.minute % 5,
+                seconds=dt_now.second,
+                microseconds=dt_now.microsecond)
+        uniq = (dt5, onoff)
+        if uniq != last_uniq:
+            dt_fmt = dt_now.replace(microsecond=0).isoformat(sep=" ")
+            print(f"{dt_fmt} co2={co2} onoff={int(onoff)} duty_1h={duty_1h}% duty_24h={duty_24h}%", flush=True)
+            last_uniq = uniq
 
-        # Passively consume messages for a while.
-        await st.wait_until(now + 10)
+        # Passively consume messages for ~10 seconds.
+        await st.wait_until(now + 137/13)
 
 
 # https://stackoverflow.com/questions/20094215/argparse-subparser-monolithic-help-output
