@@ -90,7 +90,7 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
   ![](./misc/everything_fits.jpg)
 - The only building modification is a Z-wave smart switch controlling the bathroom vent fan:  
   ![](./misc/smart_switch.jpg)
-- Hot glue the RPi case to a power supply for wall mounting somewhere within Z-wave range of the switch:  
+- Hot glue the RPi case to a power supply for wall mounting, somewhere within range of the z-wave switch:  
   ![](./misc/wall_mount.jpg)
 - To see the red LED (faintly), drill a hole in the lid and fill with hot glue. Here it is blinking 8 times for >=800 ppm. Every fifth blink is slower:  
   ![](./misc/blink8.gif)
