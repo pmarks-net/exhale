@@ -575,7 +575,7 @@ async def co2_sub(args, co2_tracker):
         uniq = (dt_5min, fan)
         if uniq != last_uniq:
             dt_nowf = dt_now.replace(microsecond=0).isoformat(sep=" ")
-            uptime = (now - boot_time) // 3600
+            uptime = int((now - boot_time) // 3600)
             print(f"{dt_nowf} co2={co2} fan={fan.name} "
                   f"uptime={uptime}h duty_1h={duty_1h}% duty_24h={duty_24h}%",
                   flush=True)
