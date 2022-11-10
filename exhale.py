@@ -211,7 +211,7 @@ class StateTracker:
             raise AssertionError("Can't wait_for_nodes() with existing home_id")
         zwargs = await self._match("DriverReady")
         self.home_id = zwargs["homeId"]
-        await self._match("AllNodesQueried|AllNodesQueriedSomeDead")
+        await self._match("AllNodesQueried|AllNodesQueriedSomeDead|AwakeNodesQueried")
         self._nodes_queried = True
         for switch in self.switches.values():
             switch.set_alive()
