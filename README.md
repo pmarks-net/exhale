@@ -31,7 +31,7 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
 
 - Configure GPIO pins:
   ```
-  # /dev/ttyS0 (zwave controller) on GPIO 2-3:
+  # /dev/ttyS0 (zwave controller) on GPIO 14-15:
   sudo raspi-config nonint do_serial 2
   # /dev/i2c-6 (scd30) on GPIO 9-10:
   sudo raspi-config nonint do_i2c 0
