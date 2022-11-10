@@ -618,7 +618,7 @@ def main():
     parser_co2 = subparsers.add_parser("co2", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
     parser_co2.add_argument("--zdevice", help="ZWave serial device", default="/dev/ttyS0", metavar="/dev/ttyS0")
     parser_co2.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N; requires (e.g.) dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10", default=6, metavar="6")
-    parser_co2.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=800, metavar="800")
+    parser_co2.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=900, metavar="900")
     parser_co2.add_argument("--co2_diff", type=int, help="Disable fan when CO₂ level falls below (limit-diff)", default=50, metavar="50")
     parser_co2.add_argument("--manual", type=int, help="When a switch is toggled manually, disable automatic control for this many seconds", default=3600, metavar="3600")
     parser_co2.set_defaults(func=co2_main)
