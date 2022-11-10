@@ -7,5 +7,7 @@ screen -ls exhale && echo "Daemon already running" && exit 1
 # You can customize these command line flags:
 echo "cd $dir; ./exhale.py co2 --zdevice=/dev/ttyS0 --scd30_i2c=6" >"$h"
 
+# TODO: 'screen' is bad for daemonization because staying in copy mode
+#       blocks stdout.  Should I give up and use systemd?
 HISTFILE="$h" screen -dmS exhale -h 10000 bash --init-file "$h" \
     && echo "Daemon started"
