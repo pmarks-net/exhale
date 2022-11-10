@@ -36,6 +36,11 @@ class SwitchToggled(Exception):
     pass
 
 
+class FanState(Enum):
+    ON = True
+    OFF = False
+
+
 class Switch:
     def __init__(self, node_id, switch_id, manager_set_value, manual_secs):
         self.node_id = node_id
@@ -516,6 +521,7 @@ async def co2_main(args):
         co2_tracker.task.cancel()
 
 async def co2_sub(args, co2_tracker):
+    boot_time = time.monotonic()
 
     def manager_set_value(switch_id, value):
         manager.setValue(switch_id, value)
@@ -535,7 +541,7 @@ async def co2_sub(args, co2_tracker):
     for switch in st.switches.values():
         manager.enablePoll(switch.switch_id)
 
-    onoff = False
+    fan = FanState.OFF
 
     duty_1h_avgr = Averager(1*3600)
     duty_24h_avgr = Averager(24*3600)
@@ -543,32 +549,36 @@ async def co2_sub(args, co2_tracker):
 
     while True:
         co2 = co2_tracker.compute_co2_avg()
-        if co2 > args.co2_limit:
-            onoff = True
-        elif co2 < args.co2_limit - args.co2_diff:
-            onoff = False
+        if co2 >= args.co2_limit:
+            fan = FanState.ON
+        elif co2 <= args.co2_limit - args.co2_diff:
+            fan = FanState.OFF
 
         for switch in st.switches.values():
-            switch.set_want_onoff(onoff)
+            switch.set_want_onoff(fan.value)
 
         now = time.monotonic()
-        duty_1h_avgr.add(now, onoff)
-        duty_24h_avgr.add(now, onoff)
+        duty_1h_avgr.add(now, fan.value)
+        duty_24h_avgr.add(now, fan.value)
 
         # Round up, so any activity reports >= 1%
         duty_1h = math.ceil(duty_1h_avgr.compute_avg() * 100)
         duty_24h = math.ceil(duty_24h_avgr.compute_avg() * 100)
 
-        # Log every 5 minutes, or when onoff changes.
+        # Log every 5 minutes, or when fan state changes.
         dt_now = datetime.datetime.now()
-        dt5 = dt_now - datetime.timedelta(
+        dt_5min = dt_now - datetime.timedelta(
                 minutes=dt_now.minute % 5,
                 seconds=dt_now.second,
                 microseconds=dt_now.microsecond)
-        uniq = (dt5, onoff)
+
+        uniq = (dt_5min, fan)
         if uniq != last_uniq:
-            dt_fmt = dt_now.replace(microsecond=0).isoformat(sep=" ")
-            print(f"{dt_fmt} co2={co2} onoff={int(onoff)} duty_1h={duty_1h}% duty_24h={duty_24h}%", flush=True)
+            dt_nowf = dt_now.replace(microsecond=0).isoformat(sep=" ")
+            uptime = (now - boot_time) // 3600
+            print(f"{dt_nowf} co2={co2} fan={fan.name} "
+                  f"uptime={uptime}h duty_1h={duty_1h}% duty_24h={duty_24h}%",
+                  flush=True)
             last_uniq = uniq
 
         # Passively consume messages for ~10 seconds.
