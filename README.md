@@ -117,7 +117,8 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
   su pi -c "/home/pi/exhale/daemon.sh"
   ```
 
-- Enable overlay file system, for read-only SD card: https://learn.adafruit.com/read-only-raspberry-pi
+- Enable overlay file system, for read-only SD card: https://learn.adafruit.com/read-only-raspberry-pi  
+  (XXX this is broken on Le Potato... so is Adafruit's read-only-fs.sh)
 
 ## Photos
 - Attach the RaZberry and SCD30 as shown; insulate behind the SCD30 with electrical tape:  
