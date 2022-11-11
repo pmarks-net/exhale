@@ -118,7 +118,17 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
   ```
 
 - Enable overlay file system, for read-only SD card: https://learn.adafruit.com/read-only-raspberry-pi  
-  (XXX this is broken on Le Potato... so is Adafruit's read-only-fs.sh)
+  XXX that seems broken on Le Potato; here's a horrifying workaround.
+  ```
+  # Le Potato read-only filesystem:
+  git clone https://github.com/adafruit/Raspberry-Pi-Installer-Scripts.git
+  cd Raspberry-Pi-Installer-Scripts
+  sed '1,10s,^exit 0,#exit 0,' -i read-only-fs.sh
+  sed 's,/boot,/boot/efi,g'    -i read-only-fs.sh
+  sed 's,ext4,btrfs,g'         -i read-only-fs.sh
+  sudo ./read-only-fs.sh  # Answer ynnny
+  ```
+  
 
 ## Photos
 - Attach the RaZberry and SCD30 as shown; insulate behind the SCD30 with electrical tape:  
