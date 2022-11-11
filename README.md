@@ -5,7 +5,7 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
 
 ## Hardware I'm using
 - UltraPro Z-Wave Plus toggle switch
-- Raspberry Pi 3 B+ (TODO: experiment with "Le Potato" AML-S905X-CC)
+- Raspberry Pi 3 B+ or "Le Potato" AML-S905X-CC (similar form factor)
 - Adafruit SCD-30 CO2 sensor + STEMMA QT with female sockets
 - Z-Wave.Me RaZberry2 (also tested with HUSBZ-1 USB Z-wave controller)
 - CanaKit Premium Black Case
