@@ -1,0 +1,41 @@
+/*
+Trying to emulate this RasPi config:
+  dtoverlay=i2c-gpio,bus=302,i2c_gpio_scl=9,i2c_gpio_sda=10
+
+The bus=302 feature is RasPi-exclusive, so we'll have to discover the
+correct bus number from /sys/devices/platform/i2c-exhale/i2c-*
+
+How to install this:
+
+git clone https://github.com/libre-computer-project/libretech-wiring-tool
+cp -v exhale/lepotato/i2c-exhale.dts libretech-wiring-tool/libre-computer/aml-s905x-cc/dt/
+cd libretech-wiring-tool
+make
+sudo ./ldto enable i2c-exhale  # enable immediately
+sudo ./ldto merge i2c-exhale   # enable on boot
+*/
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	fragment@0 {
+		target-path = "/";
+
+		__overlay__ {
+			i2c_gpio: i2c-exhale {
+				compatible = "i2c-gpio";
+				/* Pin numbers from "lgpio header 7J1", Line column. */
+				gpios = <&gpio 87 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN) /* sda GPIOX_8 */
+					 &gpio 88 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN) /* scl GPIOX 9 */
+					>;
+				/* SCL frequency is (500 / udelay) kHz */
+				i2c-gpio,delay-us = <10>;  /* ~50 kHz */
+				#address-cells = <1>;
+				#size-cells = <0>;
+			};
+		};
+	};
+};
