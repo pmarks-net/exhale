@@ -4,8 +4,10 @@ import argparse
 import asyncio
 import collections
 import datetime
+import glob
 import math
 import os
+import re
 import tempfile
 import time
 import traceback
@@ -327,7 +329,7 @@ class Averager:
 
 class CO2Reader:
     def __init__(self, scd30_i2c):
-        i2c = adafruit_extended_bus.ExtendedI2C(scd30_i2c)
+        i2c = adafruit_extended_bus.ExtendedI2C(discover_scd30_i2c(scd30_i2c))
         self.scd = adafruit_scd30.SCD30(i2c)
 
     async def read(self):
@@ -414,8 +416,12 @@ class Blinker:
 
     async def run_or_die(self):
         # Raspberry Pi red LED:
-        # sudo chmod a+w /sys/class/leds/led1/brightness
-        with open("/sys/class/leds/led1/brightness", "w") as f:
+        #   chmod a+w /sys/class/leds/led1/brightness
+        #   ln -s /sys/class/leds/led1/brightness /tmp/exhale.led
+        # Le Potato green LED:
+        #   chmod a+w /sys/class/leds/librecomputer:system-status/brightness
+        #   ln -s /sys/class/leds/librecomputer:system-status/brightness /tmp/exhale.led
+        with open("/tmp/exhale.led", "w") as f:
             async def write_n(n, sleep_time=None):
                 f.write("%d\n" % n)
                 f.flush()
@@ -443,6 +449,41 @@ class Blinker:
                 await asyncio.sleep(3.0)
 
 
+def discover_zdevice(zdevice):
+    if zdevice is not None:
+        return zdevice
+    GLOBS = [
+        # Le Potato "ldto enable uarta" -- not sure where 6 comes from.
+        "/dev/ttyAML6",
+        # RasPi "raspi-config nonint do_serial 2"
+        "/dev/ttyS0",
+    ]
+    for g in GLOBS:
+        for zdevice in glob.glob(g):
+            print(f"Discovered --zdevice={zdevice}")
+            return zdevice
+
+
+def discover_scd30_i2c(scd30_i2c):
+    if scd30_i2c is not None:
+        return scd30_i2c
+    GLOBS = [
+        # Raspberry Pi dtoverlay=i2c-gpio,bus=302,...
+        "/dev/i2c-302",
+        # lepotato/i2c-exhale.dts
+        "/sys/devices/platform/i2c-exhale/i2c-*",
+    ]
+    for g in GLOBS:
+        for path in glob.glob(g):
+            m = re.search("[0-9]+$", path)
+            if not m:
+                continue
+            scd30_i2c = int(m.group(0))
+            print(f"Discovered --scd30_i2c={scd30_i2c} from {path}")
+            return scd30_i2c
+    raise ValueError("Failed to discover --scd30_i2c")
+
+
 async def hard_reset(args):
     def manager_set_value(switch_id, value):
         print("ignored manager_set_value")
@@ -453,7 +494,7 @@ async def hard_reset(args):
     manager = libopenzwave.PyManager()
     manager.create()
     manager.addWatcher(st.threadsafe_watcher_cb)
-    manager.addDriver(args.zdevice)
+    manager.addDriver(discover_zdevice(args.zdevice))
 
     await st.wait_for_nodes()
 
@@ -531,7 +572,7 @@ async def co2_sub(args, co2_tracker):
     manager = libopenzwave.PyManager()
     manager.create()
     manager.addWatcher(st.threadsafe_watcher_cb)
-    manager.addDriver(args.zdevice)
+    manager.addDriver(discover_zdevice(args.zdevice))
 
     await st.wait_for_nodes()
     print("Active switch count: %d" % len(st.switches))
@@ -605,23 +646,23 @@ def main():
     subparsers = parser.add_subparsers(dest="subcommand")
     parser.add_argument('-h', '--help', action=_HelpAction)
 
-    parser_reset = subparsers.add_parser("reset", description="Reinitialize the ZWave network. Before running this command, all switches must be in the 'factory reset' state. To factory reset an UltraPro Z-Wave toggle switch, quickly press 'up up up down down down'. Later when prompted, press 'up' to add each switch to the ZWave network.")
-    parser_reset.add_argument("--zdevice", help="ZWave serial device", default="/dev/ttyS0", metavar="/dev/ttyS0")
-    parser_reset.add_argument("--switches", type=int, help="Number of switches to add", required=True, metavar="N")
-    parser_reset.set_defaults(func=hard_reset)
+    p = subparsers.add_parser("calibrate", description="Calibrate the SCD30 CO₂ sensor in outdoor air. LED will blink slow for 2 minutes, calibrate, then blink quickly. Without --scd30_ppm, this just tests the sensor.")
+    p.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N (default=auto)", metavar="N")
+    p.add_argument("--scd30_ppm", type=int, help="Outdoor CO₂ ppm (default=dry_run)", default=None, metavar="PPM")
+    p.set_defaults(func=calibrate)
 
-    parser_cal = subparsers.add_parser("calibrate", description="Calibrate the SCD30 CO₂ sensor in outdoor air. LED will blink slow for 2 minutes, calibrate, then blink quickly.")
-    parser_cal.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N", default=6, metavar="6")
-    parser_cal.add_argument("--scd30_ppm", type=int, help="Outdoor CO₂ ppm (default=dry_run)", default=None, metavar="PPM")
-    parser_cal.set_defaults(func=calibrate)
+    p = subparsers.add_parser("reset", description="Reinitialize the ZWave network. Before running this command, all switches must be in the 'factory reset' state. To factory reset an UltraPro Z-Wave toggle switch, quickly press 'up up up down down down'. Later when prompted, press 'up' to add each switch to the ZWave network.")
+    p.add_argument("--zdevice", help="ZWave serial device (default=auto)", metavar="/dev/ttyX")
+    p.add_argument("--switches", type=int, help="Number of switches to add", required=True, metavar="N")
+    p.set_defaults(func=hard_reset)
 
-    parser_co2 = subparsers.add_parser("co2", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
-    parser_co2.add_argument("--zdevice", help="ZWave serial device", default="/dev/ttyS0", metavar="/dev/ttyS0")
-    parser_co2.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N; requires (e.g.) dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10", default=6, metavar="6")
-    parser_co2.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=900, metavar="900")
-    parser_co2.add_argument("--co2_diff", type=int, help="Disable fan when CO₂ level falls below (limit-diff)", default=50, metavar="50")
-    parser_co2.add_argument("--manual", type=int, help="When a switch is toggled manually, disable automatic control for this many seconds", default=3600, metavar="3600")
-    parser_co2.set_defaults(func=co2_main)
+    p = subparsers.add_parser("run", description="Run the daemon to monitor CO₂ levels and control exhaust fans.")
+    p.add_argument("--zdevice", help="ZWave serial device (default=auto)", metavar="/dev/ttyX")
+    p.add_argument("--scd30_i2c", type=int, help="Read from SCD30 at /dev/i2c-N (default=auto)", metavar="N")
+    p.add_argument("--co2_limit", type=int, help="Enable fan when CO₂ level exceeds this ppm value", default=900, metavar="900")
+    p.add_argument("--co2_diff", type=int, help="Disable fan when CO₂ level falls below (limit-diff)", default=50, metavar="50")
+    p.add_argument("--manual", type=int, help="When a switch is toggled manually, disable automatic control for this many seconds", default=3600, metavar="3600")
+    p.set_defaults(func=co2_main)
 
     args = parser.parse_args()
     if not args.subcommand:

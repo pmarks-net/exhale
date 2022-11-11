@@ -29,54 +29,90 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
   ./setup-lib.py install --user --flavor=shared
   ```
 
-- Configure GPIO pins:
+- Configure GPIO pins (Raspberry Pi):
   ```
   # /dev/ttyS0 (zwave controller) on GPIO 14-15:
   sudo raspi-config nonint do_serial 2
-  # /dev/i2c-6 (scd30) on GPIO 9-10:
+  # /dev/i2c-302 (scd30) on GPIO 9-10:
   sudo raspi-config nonint do_i2c 0
-  echo 'dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10' | sudo tee -a /boot/config.txt
+  echo 'dtoverlay=i2c-gpio,bus=302,i2c_gpio_scl=9,i2c_gpio_sda=10' | sudo tee -a /boot/config.txt
+  sudo reboot
   ```
 
-- Make `./exhale.py reset` work, followed by `./exhale.py co2`:
+- Configure GPIO pins (Le Potato):
+  ```
+  cd
+  git clone https://github.com/libre-computer-project/libretech-wiring-tool
+  cp -v exhale/lepotato/i2c-exhale.dts libretech-wiring-tool/libre-computer/aml-s905x-cc/dt/
+  cd libretech-wiring-tool
+  make
+  # "enable" is temporary, so also do this from rc.local:
+  sudo ./ldto enable i2c-exhale uarta
+  ```
+
+- Play with `calibrate`, `reset`, and `run` in that order:
   ```
   $ git clone https://github.com/pmarks-net/exhale.git
   $ cd exhale
   $ ./exhale.py --help
+  === subcommand 'calibrate' ===
+  usage: exhale.py calibrate [-h] [--scd30_i2c N] [--scd30_ppm PPM]
+  
+  Calibrate the SCD30 CO₂ sensor in outdoor air. LED will blink slow for 2
+  minutes, calibrate, then blink quickly. Without --scd30_ppm, this just tests
+  the sensor.
+  
+  optional arguments:
+    -h, --help       show this help message and exit
+    --scd30_i2c N    Read from SCD30 at /dev/i2c-N (default=auto)
+    --scd30_ppm PPM  Outdoor CO₂ ppm (default=dry_run)
+  
   === subcommand 'reset' ===
-  usage: exhale.py reset [-h] --zdevice /dev/ttyX --switches N
-
+  usage: exhale.py reset [-h] [--zdevice /dev/ttyX] --switches N
+  
   Reinitialize the ZWave network. Before running this command, all switches must
   be in the 'factory reset' state. To factory reset an UltraPro Z-Wave toggle
   switch, quickly press 'up up up down down down'. Later when prompted, press
   'up' to add each switch to the ZWave network.
-
+  
   optional arguments:
     -h, --help           show this help message and exit
-    --zdevice /dev/ttyX  ZWave serial device
+    --zdevice /dev/ttyX  ZWave serial device (default=auto)
     --switches N         Number of switches to add
-
-  === subcommand 'co2' ===
-  usage: exhale.py co2 [-h] --zdevice /dev/ttyX [--scd30_i2c 6]
-                       [--co2_limit 800] [--co2_diff 50] [--manual 3600]
-
+  
+  === subcommand 'run' ===
+  usage: exhale.py run [-h] [--zdevice /dev/ttyX] [--scd30_i2c N]
+                       [--co2_limit 900] [--co2_diff 50] [--manual 3600]
+  
   Run the daemon to monitor CO₂ levels and control exhaust fans.
-
+  
   optional arguments:
     -h, --help           show this help message and exit
-    --zdevice /dev/ttyX  ZWave serial device
-    --scd30_i2c 6        Read from SCD30 at /dev/i2c-N; requires (e.g.)
-                         dtoverlay=i2c-gpio,bus=6,i2c_gpio_scl=9,i2c_gpio_sda=10
-    --co2_limit 800      Enable fan when CO₂ level exceeds this ppm value
+    --zdevice /dev/ttyX  ZWave serial device (default=auto)
+    --scd30_i2c N        Read from SCD30 at /dev/i2c-N (default=auto)
+    --co2_limit 900      Enable fan when CO₂ level exceeds this ppm value
     --co2_diff 50        Disable fan when CO₂ level falls below (limit-diff)
     --manual 3600        When a switch is toggled manually, disable automatic
                          control for this many seconds
   ```
 
-- Add stuff to `/etc/rc.local`:
+- Add stuff to `/etc/rc.local` (Raspberry Pi):
   ```shell
-  # The LED blinker won't work without this:
+  # Set up the red LED
   chmod a+w /sys/class/leds/led1/brightness
+  ln -s /sys/class/leds/led1/brightness /tmp/exhale.led
+  # Use `screen -r` to see logs and debug:
+  su pi -c "/home/pi/exhale/daemon.sh"
+  ```
+
+- Add stuff to `/etc/rc.local` (Le Potato):
+  ```shell
+  # Set up GPIOs
+  /home/pi/libretech-wiring-tool/ldto enable i2c-exhale uarta
+  # Set up the green LED (blue off, red blocked with electrical tape)
+  echo 0 > /sys/class/leds/librecomputer:blue/brightness
+  chmod a+w /sys/class/leds/librecomputer:system-status/brightness
+  ln -s /sys/class/leds/librecomputer:system-status/brightness /tmp/exhale.led
   # Use `screen -r` to see logs and debug:
   su pi -c "/home/pi/exhale/daemon.sh"
   ```
