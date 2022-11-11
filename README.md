@@ -4,7 +4,7 @@ Ventilating your home keeps the air fresh, but too much ventilation wastes energ
 This project controls a bathroom vent fan using a Z-wave smart switch, providing "just enough" ventilation to maintain a target CO₂ level. The code runs on a Raspberry Pi with no network access and a read-only filesystem.
 
 ## Hardware I'm using
-- UltraPro Z-Wave Plus toggle switch
+- UltraPro Z-Wave Plus toggle switch (also tested with GE enbrighten Z-Wave)
 - Raspberry Pi 3 B+ or "Le Potato" AML-S905X-CC (similar form factor)
 - Adafruit SCD-30 CO2 sensor + STEMMA QT with female sockets
 - Z-Wave.Me RaZberry2 (also tested with HUSBZ-1 USB Z-wave controller)
