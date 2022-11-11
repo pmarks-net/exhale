@@ -1,7 +1,8 @@
 # exhale: software-defined fresh air
+
 Ventilating your home keeps the air fresh, but too much ventilation wastes energy.
 
-This project controls a bathroom vent fan using a Z-wave smart switch, providing "just enough" ventilation to maintain a target CO₂ level. The code runs on a Raspberry Pi with no network access and a read-only filesystem.
+This project controls a bathroom vent fan using a Z-wave smart switch, providing "just enough" ventilation to maintain a target CO₂ level. The code runs on a Raspberry Pi with no network access and a read-only filesystem. The hardware is assembled from off-the-shelf parts.
 
 ## Hardware I'm using
 - UltraPro Z-Wave Plus toggle switch (also tested with GE enbrighten Z-Wave)
