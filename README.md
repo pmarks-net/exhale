@@ -121,6 +121,15 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
 
 ## Photos
 - Attach the RaZberry and SCD30 as shown; insulate behind the SCD30 with electrical tape:  
+  ```
+  ZZZZZ...............
+  ZZZZZ...RBY.K.......
+  Z = RaZberry
+  R = red (3.3V)
+  B = blue (I2C data)
+  Y = yellow (I2C clock)
+  K = black (ground)
+  ```  
   ![](./misc/scd30_backside.jpg)  
 - Everything fits in the case when positioned like this:
   ![](./misc/everything_fits.jpg)
