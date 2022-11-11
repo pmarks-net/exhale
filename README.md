@@ -18,6 +18,7 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
   ```shell
   sudo apt install -y git screen python3-pip
   pip3 install adafruit-circuitpython-scd30 adafruit-extended-bus
+  git clone https://github.com/pmarks-net/exhale.git
   ```
 - Apparently python-openzwave 0.4.19 doesn't install on RPiOS 11, so perhaps it was a bad idea to depend on this library, but for now it's still buildable:
 
@@ -52,8 +53,6 @@ This project controls a bathroom vent fan using a Z-wave smart switch, providing
 
 - Play with `calibrate`, `reset`, and `run` in that order:
   ```
-  $ git clone https://github.com/pmarks-net/exhale.git
-  $ cd exhale
   $ ./exhale.py --help
   === subcommand 'calibrate' ===
   usage: exhale.py calibrate [-h] [--scd30_i2c N] [--scd30_ppm PPM]
