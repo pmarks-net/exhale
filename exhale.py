@@ -498,8 +498,9 @@ async def hard_reset(args):
 
     await st.wait_for_nodes()
 
-    print("Sleeping for 5 seconds...")
-    await st.wait_until(time.monotonic() + 5)
+    # This seems necessary since openzwave added a bunch of ZWave+ junk.
+    print("Sleeping for 10 seconds...")
+    await st.wait_until(time.monotonic() + 10)
 
     print("Resetting controller...")
     manager.resetController(st.home_id)
